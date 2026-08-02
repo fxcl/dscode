@@ -1,3 +1,14 @@
+/**
+ * Lightweight paper ranking utility.
+ *
+ * DSCode uses a deliberately simpler 3-factor score (relevance / citation /
+ * recency) compared to Feynman's 6-factor ranking (citation impact, recency,
+ * venue, methodology, reproducibility, journal prestige). The two extras —
+ * venue and reproducibility — would require metadata we do not fetch at this
+ * layer. Callers that need them should extend `PaperRankOptions` and apply
+ * their own weighted combination on top of `rankPapers` output.
+ */
+
 export interface PaperRankRecord {
   id: string;
   title: string;

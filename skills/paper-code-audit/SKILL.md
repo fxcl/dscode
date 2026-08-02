@@ -7,6 +7,6 @@ description: Compare a paper's claims against its public codebase. Use when the 
 
 Run the `/audit` workflow. The slash command expands the full workflow instructions in the active session; do not try to read a relative prompt-template path from the installed skill directory.
 
-Agents used: `researcher`, `verifier`
+Agents used: invoked through `delegate` with roles `researcher`, `verifier` (both read-only).
 
 Output: audit report in `outputs/`.

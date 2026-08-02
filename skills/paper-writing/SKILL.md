@@ -7,6 +7,6 @@ description: Turn research findings into a polished paper-style draft with secti
 
 Run the `/draft` workflow. The slash command expands the full workflow instructions in the active session; do not try to read a relative prompt-template path from the installed skill directory.
 
-Agents used: `writer`, `verifier`
+Agents used: invoked through `delegate` with roles `writer`, `verifier` (both read-only).
 
 Output: paper draft in `papers/`.

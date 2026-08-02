@@ -179,7 +179,7 @@ export function parseRuntimeArgs(argv: string[]): ParsedRuntimeArgs {
 function defaultActiveTools(harness: HarnessMode): string[] {
   const delegation = Number(process.env.DSCODE_SUBAGENT_DEPTH ?? "0") < 1 ? ["delegate"] : [];
   return harness === "minimal"
-    ? ["update_plan", "exec_command", "write_stdin", "apply_patch", ...delegation]
+    ? ["update_plan", "exec_command", "write_stdin", "apply_patch", "web_search", ...delegation]
     : [
         "update_plan",
         "read_file",
@@ -189,6 +189,7 @@ function defaultActiveTools(harness: HarnessMode): string[] {
         "exec_command",
         "write_stdin",
         "apply_patch",
+        "web_search",
         ...delegation,
       ];
 }

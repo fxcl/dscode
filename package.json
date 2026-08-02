@@ -42,7 +42,7 @@
     "prepack": "pnpm build",
     "prepublishOnly": "pnpm check",
     "predev": "pnpm build:core",
-    "dev": "tsx src/cli.ts",
+    "dev": "tsx --env-file=.env src/cli.ts --network",
     "start": "node dist/cli.js",
     "test": "vitest run",
     "package:check": "node scripts/package-smoke.mjs",

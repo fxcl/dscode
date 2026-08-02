@@ -49,6 +49,7 @@ import { registerServiceTierControls } from "./service-tier.js";
 import { formatStatusReport } from "./status.js";
 import { normalizeDeepSeekBaseUrl, saveDeepSeekBaseUrl } from "./settings.js";
 import { registerSubagentTools } from "./subagents.js";
+import { isRecord } from "./type-guards.js";
 import {
   oneLine,
   renderCollapsibleToolResult,
@@ -57,7 +58,7 @@ import {
 } from "./tool-ui.js";
 import { createCodingTools } from "./tools.js";
 import { formatThinkingLabel, registerCodingTui } from "./tui-experience.js";
-import { formatWebSearchStatus, getWebSearchStatus, resolveWebSearchExecution, saveWebSearchConfig } from "./web-search.js";
+import { formatWebSearchStatus, getWebSearchStatus, resolveSearchMcpBinary, resolveWebSearchExecution, saveWebSearchConfig } from "./web-search.js";
 import { executeWebSearch, formatWebSearchResponse, type WebSearchExecOptions } from "./web-search-providers.js";
 import { Workspace } from "./workspace.js";
 
@@ -167,11 +168,10 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
       registerServiceTierControls(pi);
       registerDiscoveryCommands(pi);
       registerWebSearchCommand(pi);
-      // Register the client-side web_search tool only when a non-DeepSeek provider
-      // with an API key is configured. DeepSeek performs web search server-side.
-      if (resolveWebSearchExecution()) {
-        registerWebSearchTool(pi);
-      }
+      // Always register the web_search tool so the agent always sees it.
+      // The execute handler re-reads config at call time and returns a clear
+      // "not_configured" error guiding the user when no provider is set up.
+      registerWebSearchTool(pi);
       registerCommandTools(
         pi,
         processes,
@@ -1259,6 +1259,7 @@ function engineeringInstructions(
           "- DSCode handles recognized network and sandbox denials with an allow-once / allow-for-session / deny prompt and retries approved commands automatically. If the user denies access, report that decision; do not suggest bypassing the sandbox.",
         ]),
     "- Keep the final answer evidence-based: changed files, checks actually run, failures or limitations, and the shortest useful next action.",
+    "- For web searches, use the web_search tool. Do NOT use exec_command with curl/wget for web searches — web_search provides cleaner, more structured results.",
   ];
   if (projectCommands.length > 0) {
     instructions.push(
@@ -1290,13 +1291,33 @@ function registerWebSearchCommand(pi: ExtensionAPI): void {
       }
       if (trimmed.startsWith("provider ")) {
         const provider = trimmed.slice("provider ".length).trim();
-        if (!["auto", "deepseek", "perplexity", "exa", "google", "gemini"].includes(provider)) {
-          ctx.ui.notify("Provider must be auto, deepseek, perplexity, exa, or google.", "warning");
+        // "gemini" is accepted as a friendlier alias for "google". "auto" is a
+        // sentinel meaning "use the first configured client-side provider" and
+        // is not stored as a literal — it stays the default in the config file.
+        if (provider === "auto") {
+          saveWebSearchConfig({ provider: "auto" });
+          ctx.ui.notify("Web search provider set to auto.", "info");
           return;
         }
-        const targetProvider = provider === "gemini" ? "google" : (provider as any);
-        saveWebSearchConfig({ provider: targetProvider });
-        ctx.ui.notify(`Web search provider set to ${targetProvider}.`, "info");
+        if (provider === "gemini" || provider === "google") {
+          saveWebSearchConfig({ provider: "google" });
+          ctx.ui.notify("Web search provider set to google.", "info");
+          return;
+        }
+        if (
+          provider === "deepseek" ||
+          provider === "perplexity" ||
+          provider === "exa" ||
+          provider === "search-mcp"
+        ) {
+          saveWebSearchConfig({ provider: provider });
+          ctx.ui.notify(`Web search provider set to ${provider}.`, "info");
+          return;
+        }
+        ctx.ui.notify(
+          "Provider must be auto, deepseek, perplexity, exa, google, or search-mcp.",
+          "warning",
+        );
         return;
       }
       if (trimmed.startsWith("key ")) {
@@ -1338,21 +1359,47 @@ function registerWebSearchCommand(pi: ExtensionAPI): void {
         ctx.ui.notify(`${target} API key saved.`, "info");
         return;
       }
+      if (trimmed.startsWith("path ")) {
+        const rest = trimmed.slice("path ".length).trim();
+        const clearMatch = rest.match(/^clear\s+search-mcp$/);
+        if (clearMatch) {
+          saveWebSearchConfig({ searchMcpPath: undefined } as any);
+          ctx.ui.notify("Cleared search-mcp binary path. Auto-detection will be used.", "info");
+          return;
+        }
+        const pathMatch = rest.match(/^search-mcp\s+(.+)$/s);
+        if (!pathMatch) {
+          ctx.ui.notify(
+            "Use: /web-search path search-mcp <binary-path>, or /web-search path clear search-mcp",
+            "warning",
+          );
+          return;
+        }
+        const value = pathMatch[1]?.trim() ?? "";
+        if (!value) {
+          ctx.ui.notify("Binary path must not be empty.", "warning");
+          return;
+        }
+        saveWebSearchConfig({ searchMcpPath: value });
+        const resolved = resolveSearchMcpBinary(value);
+        if (resolved) {
+          ctx.ui.notify(`search-mcp binary path saved: ${resolved}`, "info");
+        } else {
+          ctx.ui.notify(`search-mcp path saved but binary not found at: ${value}`, "warning");
+        }
+        return;
+      }
       ctx.ui.notify(
-        "Use: /web-search, /web-search on|off, /web-search provider <auto|deepseek|perplexity|exa|google>, /web-search key <perplexity|exa|google> <key>, /web-search key clear <perplexity|exa|google>",
+        "Use: /web-search, /web-search on|off, /web-search provider <auto|deepseek|perplexity|exa|google|search-mcp>, /web-search key <perplexity|exa|google> <key>, /web-search path <search-mcp> <path>",
         "warning",
       );
     },
   });
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 /** Structured details for the client-side web_search tool results. */
 type WebSearchToolDetails = {
-  provider?: "exa" | "perplexity" | "google";
+  provider?: "exa" | "perplexity" | "google" | "search-mcp";
   query?: string;
   hitCount?: number;
   error?: string;
@@ -1363,10 +1410,11 @@ function registerWebSearchTool(pi: ExtensionAPI): void {
     name: "web_search",
     label: "Web search",
     description:
-      "Search the web using the configured Perplexity or Exa provider for current information, documentation, or facts outside the codebase.",
-    promptSnippet: "web_search: look up current information on the web via Perplexity or Exa",
+      "Search the web using the configured provider (Perplexity, Exa, Google Gemini, or search-mcp) for current information, documentation, or facts outside the codebase.",
+    promptSnippet: "web_search: look up current information on the web (prefer this over curl for any web search)",
     promptGuidelines: [
-      "Use web_search for current documentation, release notes, or facts outside the codebase.",
+      "Use web_search — NOT exec_command with curl/wget — for any web search, current documentation, release notes, or facts outside the codebase.",
+      "If web_search returns a 'not_configured' error, tell the user to run /web-search to set up a provider, and do NOT fall back to curl or exec for web searches.",
       "Do not use web_search for information already present in the workspace; prefer read or grep first.",
     ],
     parameters: Type.Object({
@@ -1402,8 +1450,12 @@ function registerWebSearchTool(pi: ExtensionAPI): void {
               type: "text",
               text: [
                 "Web search is not configured for a client-side provider.",
-                "Run `/web-search provider perplexity` (or `exa`) and `/web-search key <provider> <key>`, then restart DSCode.",
-                "For DeepSeek, web search is handled server-side via the `--web` flag instead.",
+                "Options:",
+                "  - /web-search provider perplexity  +  /web-search key perplexity <key>",
+                "  - /web-search provider exa         +  /web-search key exa <key>",
+                "  - /web-search provider google      +  /web-search key google <key>",
+                "  - /web-search provider search-mcp  (no key needed; binary must be on PATH)",
+                "For DeepSeek, web search is handled server-side via the --web flag instead.",
               ].join("\n"),
             },
           ],

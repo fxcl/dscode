@@ -20,6 +20,13 @@ export const SUPPORTED_PROVIDER_IDS = [
 ] as const;
 export type SupportedProviderId = (typeof SUPPORTED_PROVIDER_IDS)[number];
 
+// Default model IDs must exist in the bundled pi-ai data files
+// (`node_modules/@earendil-works/pi-ai/dist/providers/data/*.json`).
+// Bare names like "llama-4-scout-17b-16e-instruct" (without the
+// `meta-llama/` prefix) may resolve at runtime but fail to instantiate, so
+// prefer the exact ID the runtime knows about. Note that a single provider can
+// ship the same family across different APIs (e.g. xai exposes grok-4.5 via
+// openai-responses and grok-4.3 via openai-completions).
 const DEFAULT_MODELS: Record<SupportedProviderId, string> = {
   deepseek: "deepseek-v4-flash",
   "openai-codex": "gpt-5.6-sol",
@@ -31,10 +38,10 @@ const DEFAULT_MODELS: Record<SupportedProviderId, string> = {
   minimax: "MiniMax-M2.7",
   xai: "grok-4.5",
   google: "gemini-2.5-flash",
-  groq: "llama-4-scout-17b-16e-instruct",
+  groq: "meta-llama/llama-4-scout-17b-16e-instruct",
   mistral: "mistral-large-latest",
-  cerebras: "llama-4-scout-17b-16e-instruct",
-  "amazon-bedrock": "anthropic.claude-opus-4-8-20250514",
+  cerebras: "gpt-oss-120b",
+  "amazon-bedrock": "anthropic.claude-opus-4-8",
 };
 
 const DEFAULT_EFFORTS: Record<SupportedProviderId, string> = {
@@ -214,11 +221,11 @@ const CODING_MODEL_PREFERENCES: ModelPreference[] = [
   { providerId: "kimi-coding", modelId: "kimi-for-coding", reason: "coding-specialized Kimi plan" },
   { providerId: "zai", modelId: "glm-5.1", reason: "solid fallback for GLM-based coding" },
   { providerId: "minimax", modelId: "MiniMax-M2.7", reason: "good fallback when MiniMax is the available provider" },
-  { providerId: "groq", modelId: "llama-4-scout-17b-16e-instruct", reason: "extremely fast inference for rapid iterations" },
+  { providerId: "groq", modelId: "meta-llama/llama-4-scout-17b-16e-instruct", reason: "extremely fast inference for rapid iterations" },
   { providerId: "mistral", modelId: "mistral-large-latest", reason: "solid alternative for robust reasoning" },
-  { providerId: "cerebras", modelId: "llama-4-scout-17b-16e-instruct", reason: "high-throughput alternative for fast responses" },
+  { providerId: "cerebras", modelId: "gpt-oss-120b", reason: "high-throughput alternative for fast responses" },
   { providerId: "google", modelId: "gemini-2.5-flash", reason: "fast standard model for general coding" },
-  { providerId: "amazon-bedrock", modelId: "anthropic.claude-opus-4-8-20250514", reason: "enterprise fallback leveraging AWS infrastructure" },
+  { providerId: "amazon-bedrock", modelId: "anthropic.claude-opus-4-8", reason: "enterprise fallback leveraging AWS infrastructure" },
 ];
 
 /** Detect which providers have credentials available (env key set). */

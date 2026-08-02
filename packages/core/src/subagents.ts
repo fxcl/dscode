@@ -19,6 +19,8 @@ const agentTaskSchema = Type.Object({
     Type.Literal("deep-research"),
     Type.Literal("code-auditor"),
     Type.Literal("paper-reviewer"),
+    Type.Literal("researcher"),
+    Type.Literal("writer"),
   ]),
   task: Type.String({ minLength: 1 }),
 });
@@ -34,7 +36,9 @@ type AgentRole =
   | "tester"
   | "deep-research"
   | "code-auditor"
-  | "paper-reviewer";
+  | "paper-reviewer"
+  | "researcher"
+  | "writer";
 
 interface SubagentResult {
   role: AgentRole;
@@ -126,6 +130,8 @@ export function registerSubagentTools(
           "deep-research: comprehensive multi-step technical/paper/code research, web search synthesis, and literature review",
           "code-auditor: deep security, architecture, and code quality audit",
           "paper-reviewer: analyzing academic papers, algorithm implementations, and experimental code",
+          "researcher: delegated multi-source web and paper research synthesis (read-only)",
+          "writer: delegated synthesis into structured drafts and reports (read-only)",
         ].join("\n"),
         "info",
       );
@@ -153,7 +159,9 @@ async function runSubagent(
     role === "verifier" ||
     role === "deep-research" ||
     role === "code-auditor" ||
-    role === "paper-reviewer";
+    role === "paper-reviewer" ||
+    role === "researcher" ||
+    role === "writer";
   const rolePrompt = `${roleInstructions(role)}
 
 Task:
@@ -332,6 +340,10 @@ function roleInstructions(role: AgentRole): string {
       return "You are a code-auditor subagent specialized in deep security, architecture, and code quality audit.";
     case "paper-reviewer":
       return "You are a paper-reviewer subagent specialized in analyzing academic papers, algorithm implementations, and experimental code.";
+    case "researcher":
+      return "You are a researcher subagent. Do not modify files. Gather, verify, and synthesize source material across web and paper sources; return concise evidence with exact URLs and clear disagreement notes.";
+    case "writer":
+      return "You are a writer subagent. Do not modify files. Turn verified research notes into structured drafts (briefs, lit reviews, comparisons, papers). Cite every claim; do not invent sources.";
   }
 }
 

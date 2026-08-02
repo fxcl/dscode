@@ -1,10 +1,28 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { installSkills, resolveTargetDir } from "../packages/core/src/skills-installer.js";
 
 describe("skills-installer", () => {
+  // `installSkills` discovers skills from `getDSCodeHome()/skills`, so isolate
+  // DSCODE_HOME to an empty temp dir per test to avoid leaking in the real
+  // ~/.dscode/skills that may exist on the developer's machine.
+  let tempHome = "";
+  let savedHome: string | undefined;
+
+  beforeEach(async () => {
+    savedHome = process.env.DSCODE_HOME;
+    tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "dscode-skill-home-"));
+    process.env.DSCODE_HOME = tempHome;
+  });
+
+  afterEach(async () => {
+    if (savedHome === undefined) delete process.env.DSCODE_HOME;
+    else process.env.DSCODE_HOME = savedHome;
+    await fs.rm(tempHome, { recursive: true, force: true });
+  });
+
   it("resolves target directory paths correctly", () => {
     const cwd = "/test/workspace";
     expect(resolveTargetDir("codex", cwd)).toBe(path.join(os.homedir(), ".codex", "skills"));

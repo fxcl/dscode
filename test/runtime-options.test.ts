@@ -42,7 +42,7 @@ describe("parseRuntimeArgs", () => {
       harness: "minimal",
       permission: "auto",
       sandbox: "workspace-write",
-      activeTools: ["update_plan", "exec_command", "write_stdin", "apply_patch", "delegate"],
+      activeTools: ["update_plan", "exec_command", "write_stdin", "apply_patch", "web_search", "delegate"],
       toolsExplicit: false,
     });
     expect(parsed.piArgs).toContain("deepseek");
@@ -108,6 +108,7 @@ describe("parseRuntimeArgs", () => {
         "exec_command",
         "write_stdin",
         "apply_patch",
+        "web_search",
         "delegate",
       ],
     });

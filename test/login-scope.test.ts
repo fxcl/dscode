@@ -14,11 +14,16 @@ describe("DSCode provider login", () => {
       "openai-codex",
       "openai",
       "anthropic",
+      "google",
+      "amazon-bedrock",
       "openrouter",
       "zai",
       "kimi-coding",
       "minimax",
       "xai",
+      "groq",
+      "mistral",
+      "cerebras",
     ]);
   });
 
@@ -27,11 +32,16 @@ describe("DSCode provider login", () => {
     "openai-codex",
     "openai",
     "anthropic",
+    "google",
+    "amazon-bedrock",
     "openrouter",
     "zai",
     "kimi-coding",
     "minimax",
     "xai",
+    "groq",
+    "mistral",
+    "cerebras",
   ] as const)(
     "allows the supported %s provider",
     (providerId) => {
@@ -56,11 +66,11 @@ describe("DSCode provider login", () => {
     });
   });
 
-  it("rejects other provider login commands without affecting ordinary prompts", () => {
-    expect(routeDSCodeLogin("/login google")).toEqual({ action: "reject" });
-    expect(routeDSCodeLogin("explain /login google")).toEqual({
+  it("rejects unsupported provider login commands without affecting ordinary prompts", () => {
+    expect(routeDSCodeLogin("/login azure")).toEqual({ action: "reject" });
+    expect(routeDSCodeLogin("explain /login azure")).toEqual({
       action: "continue",
-      text: "explain /login google",
+      text: "explain /login azure",
     });
   });
 
@@ -79,6 +89,7 @@ describe("DSCode provider login", () => {
       { ...items[2], description: "ChatGPT plan" },
       items[3],
       { ...items[4], description: "Account or API key" },
+      { ...items[5], description: "Gemini API key" },
     ]);
   });
 });

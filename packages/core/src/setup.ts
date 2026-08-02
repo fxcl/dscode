@@ -128,11 +128,14 @@ export async function runSetupWizard(): Promise<void> {
             if (prompt.type === "select") {
               return promptSelect(
                 prompt.message,
-                prompt.options.map(opt => ({
-                  value: opt.id,
-                  label: opt.label,
-                  ...(opt.description ? { hint: opt.description } : {}),
-                }))
+                prompt.options.map<PromptSelectOption<string>>((opt) => {
+                  const option: PromptSelectOption<string> = {
+                    value: opt.id,
+                    label: opt.label,
+                  };
+                  if (opt.description) option.hint = opt.description;
+                  return option;
+                })
               );
             }
             return promptText(prompt.message, "", prompt.placeholder);

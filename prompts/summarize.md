@@ -6,6 +6,10 @@ topLevelCli: true
 ---
 ## Technical Summarization Protocol
 
+Tool discipline:
+- Use `web_search` and `web_search` snippets as primary source material (DSCode does not expose `fetch_content`).
+- For delegated analysis, use `delegate` with roles: `paper-reviewer`, `researcher`, `writer`.
+
 Summarize: $@
 
 Requirements:

@@ -1,8 +1,10 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
+import os from "node:os";
 import { getDSCodeHome } from "./home.js";
 
-export type WebSearchProvider = "auto" | "deepseek" | "perplexity" | "exa" | "google";
+export type WebSearchProvider = "auto" | "deepseek" | "perplexity" | "exa" | "google" | "search-mcp";
 
 export interface WebSearchConfig {
   enabled: boolean;
@@ -10,6 +12,8 @@ export interface WebSearchConfig {
   perplexityApiKey?: string;
   exaApiKey?: string;
   googleApiKey?: string;
+  /** search-mcp only: explicit binary path. If unset, PATH lookup is used. */
+  searchMcpPath?: string;
 }
 
 export interface WebSearchStatus {
@@ -20,6 +24,7 @@ export interface WebSearchStatus {
   perplexityConfigured: boolean;
   exaConfigured: boolean;
   googleConfigured: boolean;
+  searchMcpConfigured: boolean;
 }
 
 const DEFAULT_CONFIG: WebSearchConfig = {
@@ -32,7 +37,12 @@ export function getWebSearchConfigPath(): string {
 }
 
 function normalizeProvider(value: unknown): WebSearchProvider | undefined {
-  return value === "auto" || value === "deepseek" || value === "perplexity" || value === "exa" || value === "google"
+  return value === "auto" ||
+    value === "deepseek" ||
+    value === "perplexity" ||
+    value === "exa" ||
+    value === "google" ||
+    value === "search-mcp"
     ? value
     : undefined;
 }
@@ -60,6 +70,9 @@ export function loadWebSearchConfig(
         : ((typeof parsed.geminiApiKey === "string" && parsed.geminiApiKey.trim())
           ? { googleApiKey: parsed.geminiApiKey.trim() }
           : {})),
+      ...(typeof parsed.searchMcpPath === "string" && parsed.searchMcpPath.trim()
+        ? { searchMcpPath: parsed.searchMcpPath.trim() }
+        : {}),
     };
   } catch {
     return { ...DEFAULT_CONFIG };
@@ -93,6 +106,7 @@ export function getWebSearchStatus(
     perplexityConfigured: Boolean(config.perplexityApiKey),
     exaConfigured: Boolean(config.exaApiKey),
     googleConfigured: Boolean(config.googleApiKey),
+    searchMcpConfigured: resolveSearchMcpBinary(config.searchMcpPath) !== undefined,
   };
 }
 
@@ -102,9 +116,11 @@ export function getWebSearchStatus(
  * Returns the provider + API key only when a non-DeepSeek provider is selected
  * AND its API key is configured. DeepSeek is handled server-side (see
  * optimizeDeepSeekResponsesPayload), so it never reaches this path.
+ *
+ * For search-mcp the `apiKey` field carries the resolved binary path instead.
  */
 export interface ResolvedWebSearchExecution {
-  provider: "exa" | "perplexity" | "google";
+  provider: "exa" | "perplexity" | "google" | "search-mcp";
   apiKey: string;
 }
 
@@ -112,14 +128,16 @@ export function resolveWebSearchExecution(
   configPath = getWebSearchConfigPath(),
 ): ResolvedWebSearchExecution | undefined {
   const config = loadWebSearchConfig(configPath);
-  
+
   if (config.provider === "auto") {
     if (config.exaApiKey) return { provider: "exa", apiKey: config.exaApiKey };
     if (config.perplexityApiKey) return { provider: "perplexity", apiKey: config.perplexityApiKey };
     if (config.googleApiKey) return { provider: "google", apiKey: config.googleApiKey };
+    const mcpBinary = resolveSearchMcpBinary(config.searchMcpPath);
+    if (mcpBinary) return { provider: "search-mcp", apiKey: mcpBinary };
     return undefined;
   }
-  
+
   if (config.provider === "perplexity" && config.perplexityApiKey) {
     return { provider: "perplexity", apiKey: config.perplexityApiKey };
   }
@@ -129,12 +147,56 @@ export function resolveWebSearchExecution(
   if (config.provider === "google" && config.googleApiKey) {
     return { provider: "google", apiKey: config.googleApiKey };
   }
+  if (config.provider === "search-mcp") {
+    const mcpBinary = resolveSearchMcpBinary(config.searchMcpPath);
+    if (mcpBinary) return { provider: "search-mcp", apiKey: mcpBinary };
+    return undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Resolve the search-mcp binary path.
+ *
+ * Priority: explicit config → PATH lookup → common install locations.
+ * Returns undefined if the binary cannot be found.
+ */
+export function resolveSearchMcpBinary(configuredPath?: string): string | undefined {
+  // 1. Explicit path from config
+  if (configuredPath && configuredPath.trim() && existsSync(configuredPath.trim())) {
+    return configuredPath.trim();
+  }
+
+  // 2. PATH lookup
+  try {
+    const result = execFileSync("which", ["search-mcp"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 3_000,
+    });
+    const resolved = result.trim();
+    if (resolved && existsSync(resolved)) return resolved;
+  } catch {
+    // not on PATH
+  }
+
+  // 3. Common install locations
+  const home = os.homedir();
+  const candidates = [
+    path.join(home, ".local", "bin", "search-mcp"),
+    path.join(home, "go", "bin", "search-mcp"),
+    "/usr/local/bin/search-mcp",
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+
   return undefined;
 }
 
 export function formatWebSearchStatus(status: WebSearchStatus): string {
   const resolved = resolveWebSearchExecution(status.configPath);
-  const effectiveProvider = status.provider === "auto" 
+  const effectiveProvider = status.provider === "auto"
     ? (resolved ? resolved.provider : "deepseek (server-side)")
     : status.provider;
 
@@ -143,14 +205,17 @@ export function formatWebSearchStatus(status: WebSearchStatus): string {
     `provider    ${status.provider} (effective: ${effectiveProvider})`,
   ];
   if (status.provider === "perplexity" || status.provider === "auto" || status.perplexityConfigured) {
-    lines.push(`perplexity  ${status.perplexityConfigured ? "configured" : "no API key"}`);
+    lines.push(`perplexity   ${status.perplexityConfigured ? "configured" : "no API key"}`);
   }
   if (status.provider === "exa" || status.provider === "auto" || status.exaConfigured) {
-    lines.push(`exa         ${status.exaConfigured ? "configured" : "no API key"}`);
+    lines.push(`exa          ${status.exaConfigured ? "configured" : "no API key"}`);
   }
   if (status.provider === "google" || status.provider === "auto" || status.googleConfigured) {
-    lines.push(`google      ${status.googleConfigured ? "configured" : "no API key"}`);
+    lines.push(`google       ${status.googleConfigured ? "configured" : "no API key"}`);
   }
-  lines.push(`config      ${status.configPath}`);
+  if (status.provider === "search-mcp" || status.provider === "auto" || status.searchMcpConfigured) {
+    lines.push(`search-mcp   ${status.searchMcpConfigured ? "binary found" : "binary not found"}`);
+  }
+  lines.push(`config       ${status.configPath}`);
   return lines.join("\n");
 }

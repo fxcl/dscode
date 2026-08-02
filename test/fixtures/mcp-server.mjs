@@ -11,6 +11,10 @@ const credentialEnvironmentKeys = [
   "KIMI_API_KEY",
   "MINIMAX_API_KEY",
   "XAI_API_KEY",
+  "GEMINI_API_KEY",
+  "GROQ_API_KEY",
+  "MISTRAL_API_KEY",
+  "CEREBRAS_API_KEY",
 ];
 
 const server = new McpServer({ name: "dscode-test", version: "1.0.0" });

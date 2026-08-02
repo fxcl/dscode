@@ -1,10 +1,14 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { chmodSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   WebSearchError,
   executeWebSearch,
   formatWebSearchResponse,
   searchWithExa,
   searchWithPerplexity,
+  searchWithSearchMcp,
   type WebSearchResponse,
 } from "../packages/core/src/web-search-providers.js";
 
@@ -147,6 +151,110 @@ describe("web search providers", () => {
     });
   });
 
+  describe("searchWithSearchMcp", () => {
+    // Fake binaries that let us test spawn-based execution without the real CLI.
+    const fakeBinary = join(tmpdir(), `dscode-test-searchmcp-${process.pid}.mjs`);
+    const errorBinary = join(tmpdir(), `dscode-test-searchmcp-err-${process.pid}.mjs`);
+
+    beforeAll(() => {
+      writeFileSync(
+        fakeBinary,
+        '#!/usr/bin/env node\nprocess.stdout.write(process.env.DSCODE_TEST_OUTPUT || \'{"pages":[]}\');\n',
+      );
+      chmodSync(fakeBinary, 0o755);
+
+      writeFileSync(
+        errorBinary,
+        '#!/usr/bin/env node\nprocess.stderr.write("WebBridge daemon not running");\nprocess.exit(1);\n',
+      );
+      chmodSync(errorBinary, 0o755);
+    });
+
+    afterAll(() => {
+      try { unlinkSync(fakeBinary); } catch {}
+      try { unlinkSync(errorBinary); } catch {}
+      delete process.env.DSCODE_TEST_OUTPUT;
+    });
+
+    afterEach(() => {
+      delete process.env.DSCODE_TEST_OUTPUT;
+    });
+
+    it("normalizes the pages array into hits", async () => {
+      process.env.DSCODE_TEST_OUTPUT = JSON.stringify({
+        pages: [
+          { url: "https://example.com/1", title: "Result One", markdown: "Content one." },
+          { url: "https://example.com/2", title: "Result Two", markdown: "Content two." },
+        ],
+      });
+
+      const response = await searchWithSearchMcp("test query", fakeBinary);
+
+      expect(response.provider).toBe("search-mcp");
+      expect(response.query).toBe("test query");
+      expect(response.hits).toHaveLength(2);
+      expect(response.hits[0]).toMatchObject({
+        title: "Result One",
+        url: "https://example.com/1",
+        snippet: "Content one.",
+      });
+      expect(response.hits[1].snippet).toBe("Content two.");
+    });
+
+    it("falls back to URL when title is missing", async () => {
+      process.env.DSCODE_TEST_OUTPUT = JSON.stringify({
+        pages: [{ url: "https://example.com/notitle", markdown: "No title here." }],
+      });
+
+      const response = await searchWithSearchMcp("query", fakeBinary);
+
+      expect(response.hits).toHaveLength(1);
+      expect(response.hits[0].title).toBe("example.com");
+    });
+
+    it("throws WebSearchError when the query is empty", async () => {
+      await expect(searchWithSearchMcp("   ", fakeBinary)).rejects.toMatchObject({
+        name: "WebSearchError",
+        provider: "search-mcp",
+      });
+    });
+
+    it("throws WebSearchError when the binary path is empty", async () => {
+      await expect(searchWithSearchMcp("query", "")).rejects.toMatchObject({
+        name: "WebSearchError",
+        provider: "search-mcp",
+      });
+    });
+
+    it("truncates long markdown snippets", async () => {
+      const longText = "A".repeat(3000);
+      process.env.DSCODE_TEST_OUTPUT = JSON.stringify({
+        pages: [{ url: "https://example.com/long", title: "Long", markdown: longText }],
+      });
+
+      const response = await searchWithSearchMcp("query", fakeBinary);
+
+      expect(response.hits[0].snippet.length).toBeLessThan(longText.length);
+      expect(response.hits[0].snippet.endsWith("…")).toBe(true);
+    });
+
+    it("throws WebSearchError on non-zero exit", async () => {
+      await expect(searchWithSearchMcp("query", errorBinary)).rejects.toMatchObject({
+        name: "WebSearchError",
+        provider: "search-mcp",
+      });
+    });
+
+    it("returns empty hits when pages array is absent", async () => {
+      process.env.DSCODE_TEST_OUTPUT = JSON.stringify({ message: "no results" });
+
+      const response = await searchWithSearchMcp("query", fakeBinary);
+
+      expect(response.provider).toBe("search-mcp");
+      expect(response.hits).toHaveLength(0);
+    });
+  });
+
   describe("executeWebSearch dispatch", () => {
     it("routes to the exa client", async () => {
       const { calls } = installFetch((url) => {
@@ -168,6 +276,18 @@ describe("web search providers", () => {
       const response = await executeWebSearch("perplexity", "query", "pplx-key");
       expect(response.provider).toBe("perplexity");
       expect(calls[0]?.url).toContain("api.perplexity.ai");
+    });
+
+    it("routes to the search-mcp client", async () => {
+      const dispatchBinary = join(tmpdir(), `dscode-test-searchmcp-dispatch-${process.pid}.mjs`);
+      writeFileSync(dispatchBinary, '#!/usr/bin/env node\nprocess.stdout.write(\'{"pages":[]}\');\n');
+      chmodSync(dispatchBinary, 0o755);
+      try {
+        const response = await executeWebSearch("search-mcp", "query", dispatchBinary);
+        expect(response.provider).toBe("search-mcp");
+      } finally {
+        try { unlinkSync(dispatchBinary); } catch {}
+      }
     });
   });
 

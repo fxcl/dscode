@@ -8,8 +8,9 @@ topLevelCli: true
 
 Tool names are literal. Use only tools visible in the current tool set.
 - Search with `web_search`; do not call `search_web` or `google_search`.
-- Fetch URLs with `fetch_content` or `read_url_content`.
+- Fetch URLs by reading the snippet content returned from `web_search` (DSCode does not expose `fetch_content`).
 - To ask the user a question, write plain chat text and wait for the next user message.
+- For delegated work, use `delegate` with roles: `deep-research`, `paper-reviewer`, `researcher`.
 
 Compare sources for: $@
 
@@ -17,7 +18,7 @@ Derive a short slug from the comparison topic (lowercase, hyphens, no filler wor
 
 Requirements:
 - Before starting, outline the comparison plan: which sources to compare, which dimensions to evaluate, expected output structure. Write the plan to `outputs/.plans/<slug>.md`.
-- Use the `deep-research` or `paper-reviewer` subagent to gather source material when the comparison set is broad.
+- Use the `delegate` tool with `deep-research` or `researcher` tasks (or `paper-reviewer` for academic items) to gather source material when the comparison set is broad.
 - Build a comparison matrix covering: source/tech, key claim/feature, evidence type, trade-offs, confidence.
 - Use Mermaid for method or architecture comparisons when the structure is source-supported.
 - Distinguish agreement, disagreement, and uncertainty clearly.

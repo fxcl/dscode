@@ -6,6 +6,10 @@ topLevelCli: true
 ---
 ## Literature Review Protocol
 
+Tool discipline:
+- Search with `web_search` (DSCode does not expose `fetch_content`); rely on hit snippets as source material.
+- For delegated work, use `delegate` with roles: `deep-research`, `researcher`, `paper-reviewer`.
+
 Review literature and technical documentation for: $@
 
 Derive a short slug from the topic (lowercase, hyphens, ≤5 words).

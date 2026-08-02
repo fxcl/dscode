@@ -225,24 +225,9 @@ const FLAGS_WITH_VALUES = new Set([
   "--cwd",
   "--mode",
   "--model",
-  "--limit",
-  "--expand-citations",
-  "--full-text-top",
-  "--critique-top",
-  "--synthesis-top",
-  "--synthesis-model",
-  "--output-dir",
-  "--preference-file",
-  "--reproduction-notes",
   "--prompt",
   "--service-tier",
-  "--session-dir",
-  "--source-fixture",
-  "--tier1-threshold",
-  "--tier2-threshold",
   "--thinking",
-  "--overlap",
-  "--window-size",
 ]);
 
 function positionalArgs(args: string[]): string[] {
@@ -263,26 +248,22 @@ function positionalArgs(args: string[]): string[] {
   return positionals;
 }
 
+// DSCode exposes only a small set of top-level commands; the broader
+// `alpha/packages/paper/rank/search` set from Feynman is not registered here.
+// Keeping the allowlist narrow makes telemetry reflect actual usage.
 const DEFAULT_COMMAND_NAMES = new Set([
-  "alpha",
   "chat",
   "doctor",
   "help",
   "model",
-  "packages",
-  "paper",
-  "rank",
-  "search",
   "setup",
   "status",
   "update",
+  "version",
 ]);
 
 const SAFE_SUBCOMMANDS: Record<string, Set<string>> = {
-  alpha: new Set(["login", "logout", "status", "search", "get", "ask", "code", "annotate"]),
   model: new Set(["list", "login", "logout", "set", "tier"]),
-  packages: new Set(["list", "install", "update"]),
-  search: new Set(["status", "set", "clear"]),
   setup: new Set(["preview"]),
 };
 
@@ -308,7 +289,6 @@ export function getCliTelemetryMetadata(
   const command = resolveTelemetryCommand(args, positionals, knownCommands);
   const subcommand =
     positionals[1] && SAFE_SUBCOMMANDS[command]?.has(positionals[1]) ? positionals[1] : undefined;
-  const isRankCommand = command === "rank";
 
   return normalizeTelemetryProperties({
     command,
@@ -319,15 +299,5 @@ export function getCliTelemetryMetadata(
     has_service_tier_override: Boolean(flagValue(args, "--service-tier")),
     new_session: hasFlag(args, "--new-session"),
     json: hasFlag(args, "--json"),
-    synthesize: isRankCommand ? hasFlag(args, "--synthesize") : undefined,
-    source_fixture: Boolean(flagValue(args, "--source-fixture")),
-    preference_file: Boolean(flagValue(args, "--preference-file")),
-    reproduction_notes: Boolean(flagValue(args, "--reproduction-notes")),
-    rank_topic_provided: isRankCommand && positionals.length > 1,
-    rank_limit: isRankCommand ? safeIntegerFlagValue(args, "--limit") : undefined,
-    rank_expand_citations: isRankCommand ? safeIntegerFlagValue(args, "--expand-citations") : undefined,
-    rank_full_text_top: isRankCommand ? safeIntegerFlagValue(args, "--full-text-top") : undefined,
-    rank_critique_top: isRankCommand ? safeIntegerFlagValue(args, "--critique-top") : undefined,
-    rank_synthesis_top: isRankCommand ? safeIntegerFlagValue(args, "--synthesis-top") : undefined,
   });
 }

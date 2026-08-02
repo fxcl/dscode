@@ -26,6 +26,9 @@ logs/
 # packaging artifacts
 *.tgz
 
+# vendored upstream reference checkout (not part of this repo)
+feynman/
+
 # typeScript build info
 *.tsbuildinfo
 
@@ -37,3 +40,4 @@ logs/
 .vscode/
 *.swp
 *.swo
+/outputs

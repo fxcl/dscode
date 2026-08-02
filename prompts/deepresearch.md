@@ -9,9 +9,9 @@ topLevelCli: true
 Tool names are literal. Use only tools visible in the current tool set.
 
 - Search with `web_search`; do not call `search_web`, `google_search`, or `WebSearch`.
-- Fetch URLs with `fetch_content` or `read_url_content`.
+- Fetch URLs by reading the snippet content returned from `web_search` (DSCode does not expose `fetch_content`).
 - To ask the user a question, write plain chat text and wait for the next user message.
-- Do not use `Task` as an agent dispatcher. Use only the visible `subagent` tool when it exists.
+- Do not use `Task` as an agent dispatcher. Use only the `delegate` tool — roles: `explorer`, `reviewer`, `verifier`, `deep-research`, `code-auditor`, `paper-reviewer`, `researcher`, `writer`.
 - If a tool returns `Tool not found` or `Invalid URL`, do not retry the same invalid call.
 
 Run deep research for: $@
@@ -42,13 +42,13 @@ Create `outputs/.plans/<slug>.md` immediately. The plan must include:
 - Verification log
 - Decision log
 
-Make the scale decision before assigning owners in the plan. If the topic is a narrow "what is X" explainer, the plan must use lead-owned direct search tasks only; do not allocate researcher subagents in the task ledger.
+Make the scale decision before assigning owners in the plan. If the topic is a narrow "what is X" explainer, the plan must use lead-owned direct search tasks only; do not allocate researcher tasks in the task ledger.
 
 After writing the plan, stop and ask for explicit confirmation before gathering evidence. Summarize the plan briefly and ask:
 
 `Proceed with this deep research plan? Reply "yes" to continue, or tell me what to change.`
 
-Do not run searches, fetch sources, spawn subagents, draft, cite, review, or deliver final artifacts until the user confirms. If the user requests changes, update `outputs/.plans/<slug>.md` first, then ask for confirmation again.
+Do not run searches, fetch sources, delegate tasks, draft, cite, review, or deliver final artifacts until the user confirms. If the user requests changes, update `outputs/.plans/<slug>.md` first, then ask for confirmation again.
 
 ## Step 2: Scale
 
@@ -56,10 +56,11 @@ Use direct search for:
 - Single fact or narrow question, including "what is X" explainers
 - Work you can answer with 3-10 tool calls
 
-Use subagents only when decomposition clearly helps:
-- Direct comparison of 2-3 items: 2 `deep-research` subagents
-- Broad survey or multi-faceted topic: 3-4 `deep-research` subagents
+Use `delegate` only when decomposition clearly helps:
+- Direct comparison of 2-3 items: 2 `deep-research` tasks (pass concrete deliverables to each task string)
+- Broad survey or multi-faceted topic: 3-4 `deep-research` tasks
+- Researcher-style sweep: 3-6 `researcher` tasks for source-grounded note gathering
 
 ## Step 3: Gather Evidence
 
-Search and fetch sources using `web_search` and `fetch_content`. Record findings and build a comprehensive research summary.
+Search and fetch sources using `web_search`. Record findings and build a comprehensive research summary. Treat each `web_search` hit's snippet as the primary source material; do not fabricate full-text content beyond what the snippet actually says.
