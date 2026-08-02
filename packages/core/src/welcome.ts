@@ -10,6 +10,10 @@ export interface WelcomeDetails {
   modelName?: string;
   effort: string;
   version: string;
+  toolCount?: number;
+  commandCount?: number;
+  mcpServers?: number;
+  serviceTier?: string;
 }
 
 /** Terminal pixel-art rendering of DSCode's block-whale logo. */
@@ -42,6 +46,13 @@ export function renderWelcome(width: number, details: WelcomeDetails, theme: The
   const padding = width >= 24 ? "  " : "";
   const gap = "   ";
   const logo = normalizeLogo(DSCODE_LOGO);
+  const capabilities = [
+    details.toolCount !== undefined ? `${details.toolCount} tools` : null,
+    details.commandCount !== undefined ? `${details.commandCount} commands` : null,
+    details.mcpServers ? `${details.mcpServers} mcp` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   const info = [
     `${theme.bold("DSCode")} ${theme.fg("muted", `v${details.version}`)}`,
     theme.fg(
@@ -49,6 +60,7 @@ export function renderWelcome(width: number, details: WelcomeDetails, theme: The
       `${details.modelName ?? humanizeModel(details.modelId)} · ${details.effort} effort`,
     ),
     theme.fg("muted", formatCwd(details.cwd)),
+    ...(capabilities ? [theme.fg("dim", capabilities)] : []),
   ];
   const sideBySideWidth = visibleWidth(padding) + visibleWidth(logo[0] ?? "") + gap.length + 12;
   if (width < sideBySideWidth) {

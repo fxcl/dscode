@@ -3,11 +3,15 @@ import pc from "picocolors";
 import { ensureFirstRunAuth, runAuthCommand } from "./auth.js";
 import { createDSCodeExtension } from "./dscode-extension.js";
 import { initializeDSCodeHome } from "./home.js";
+import { formatPackageList } from "./packages.js";
 import { installPiLoginSecretMask } from "./pi-login-mask.js";
 import { installPiMarkdownCodeBlocks } from "./pi-markdown.js";
 import { parseSupportedProviderId, type SupportedProviderId } from "./providers.js";
 import { parseRuntimeArgs, printDSCodeHelp } from "./runtime-options.js";
 import { installDSCodeRuntimeBranding } from "./runtime-branding.js";
+import { installSkills, formatInstallSkillsResult, type SkillInstallTarget } from "./skills-installer.js";
+import { runSetupWizard } from "./setup.js";
+import { syncBundledAssets } from "./sync.js";
 import { ensureDSCodeUiDefaults } from "./ui-defaults.js";
 import { DSCODE_VERSION } from "./version.js";
 
@@ -22,11 +26,55 @@ export async function runDSCode(argv: string[]): Promise<void> {
     process.stdout.write(`${DSCODE_VERSION}\n`);
     return;
   }
+
+  // Handle subcommands that run outside the Pi runtime.
+  const subcommand = argv[0];
+  if (subcommand === "doctor") {
+    const { runDoctorCli } = await import("./doctor.js");
+    await runDoctorCli(parsed.options.cwd);
+    return;
+  }
+  if (subcommand === "setup") {
+    await runSetupWizard();
+    return;
+  }
+  if (subcommand === "packages") {
+    const action = argv[1];
+    if (!action || action === "list") {
+      process.stdout.write(`${formatPackageList()}\n`);
+    } else {
+      process.stdout.write(
+        `Package ${action} requires the Pi runtime. Use --extension or npm directly.\n`,
+      );
+    }
+    return;
+  }
+  if (subcommand === "install-skills") {
+    let target: SkillInstallTarget = "claude";
+    if (argv.includes("--codex")) target = "codex";
+    else if (argv.includes("--opencode")) target = "opencode";
+    else if (argv.includes("--repo") || argv.includes("--claude")) target = "claude";
+
+    const res = await installSkills({ target, cwd: parsed.options.cwd });
+    process.stdout.write(`${formatInstallSkillsResult(res)}\n`);
+    return;
+  }
+
   process.chdir(parsed.options.cwd);
   const agentDirectory = await initializeDSCodeHome();
   process.env.PI_TELEMETRY ??= "0";
   process.env.PI_SKIP_VERSION_CHECK ??= "1";
   await ensureDSCodeUiDefaults(agentDirectory);
+
+  // Sync bundled prompts and skills to the agent directory.
+  try {
+    const { fileURLToPath } = await import("node:url");
+    const { dirname, resolve } = await import("node:path");
+    const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+    syncBundledAssets(appRoot, agentDirectory);
+  } catch {
+    // best-effort; prompts may not be bundled in all distributions
+  }
 
   const authCommand = parseAuthCommand(argv);
   if (authCommand) {

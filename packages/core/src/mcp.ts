@@ -67,6 +67,10 @@ export class MCPManager {
     return this.servers.flatMap((server) => server.tools);
   }
 
+  serverCount(): number {
+    return this.servers.length;
+  }
+
   async close(): Promise<void> {
     await Promise.allSettled(this.servers.map((server) => server.close()));
     this.servers.length = 0;

@@ -30,6 +30,10 @@ export interface StatusReportDetails {
     percent: number | null;
   } | undefined;
   entries: SessionEntry[];
+  tools?: string[] | undefined;
+  mcpServers?: number | undefined;
+  serviceTier?: string | undefined;
+  guidance?: string[] | undefined;
 }
 
 export function summarizeSessionUsage(entries: SessionEntry[]): SessionUsageSummary {
@@ -71,7 +75,7 @@ export function formatStatusReport(details: StatusReportDetails): string {
           usage.cacheRead,
         )} read${usage.cacheWrite ? ` · ${formatTokenCount(usage.cacheWrite)} write` : ""}`;
   const session = details.sessionName || details.sessionFile || "memory only";
-  return [
+  const lines = [
     "DSCode status",
     `model      ${details.provider}/${details.model} · ${details.effort} · ${details.transport}`,
     `workspace  ${workspace}`,
@@ -81,7 +85,20 @@ export function formatStatusReport(details: StatusReportDetails): string {
     `tokens     ${formatTokenCount(usage.input)} uncached input · ${formatTokenCount(usage.output)} output`,
     `cost       $${usage.cost.toFixed(3)}`,
     `session    ${session}`,
-  ].join("\n");
+  ];
+  if (details.tools) {
+    lines.push(`tools      ${details.tools.length} active`);
+  }
+  if (details.mcpServers !== undefined) {
+    lines.push(`mcp        ${details.mcpServers} server${details.mcpServers === 1 ? "" : "s"}`);
+  }
+  if (details.serviceTier) {
+    lines.push(`tier       ${details.serviceTier}`);
+  }
+  if (details.guidance && details.guidance.length > 0) {
+    lines.push("", ...details.guidance.map((line) => `hint       ${line}`));
+  }
+  return lines.join("\n");
 }
 
 export function formatTokenCount(value: number): string {

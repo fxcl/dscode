@@ -13,11 +13,16 @@ export const LOGIN_PROVIDER_CHOICES: ReadonlyArray<{
   { providerId: "openai-codex", label: "OpenAI Codex — ChatGPT plan" },
   { providerId: "openai", label: "OpenAI — API key" },
   { providerId: "anthropic", label: "Anthropic — Claude account or API key" },
+  { providerId: "google", label: "Google — Gemini API key" },
+  { providerId: "amazon-bedrock", label: "Amazon Bedrock — AWS credentials" },
   { providerId: "openrouter", label: "OpenRouter — account or API key" },
   { providerId: "zai", label: "Z.AI — Coding Plan API key" },
   { providerId: "kimi-coding", label: "Kimi — Kimi Code account or API key" },
   { providerId: "minimax", label: "MiniMax — API key" },
   { providerId: "xai", label: "xAI (Grok) — account or API key" },
+  { providerId: "groq", label: "Groq — API key" },
+  { providerId: "mistral", label: "Mistral — API key" },
+  { providerId: "cerebras", label: "Cerebras — API key" },
 ];
 
 const LOGIN_DESCRIPTIONS: Record<SupportedProviderId, string> = {
@@ -25,11 +30,16 @@ const LOGIN_DESCRIPTIONS: Record<SupportedProviderId, string> = {
   "openai-codex": "ChatGPT plan",
   openai: "API key",
   anthropic: "Claude account or API key",
+  google: "Gemini API key",
+  "amazon-bedrock": "AWS credentials",
   openrouter: "Account or API key",
   zai: "Coding Plan API key",
   "kimi-coding": "Kimi Code account or API key",
   minimax: "API key",
   xai: "Grok/X account or API key",
+  groq: "API key",
+  mistral: "API key",
+  cerebras: "API key",
 };
 
 export type DSCodeLoginRoute =

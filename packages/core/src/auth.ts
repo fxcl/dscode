@@ -162,6 +162,20 @@ export async function ensureFirstRunAuth(options: {
   providerId: SupportedProviderId;
   piArgs: string[];
 }): Promise<void> {
+  if (options.providerId === "amazon-bedrock") {
+    try {
+// @ts-ignore
+      const { fromNodeProviderChain } = await import("@aws-sdk/credential-provider-node");
+      await fromNodeProviderChain()();
+      return;
+    } catch {
+      if (isInteractiveInvocation(options.piArgs)) return;
+      throw new Error(
+        `Amazon Bedrock is not configured. Run \`dscode login amazon-bedrock\` or set AWS credentials.`,
+      );
+    }
+  }
+
   const environmentKey = providerEnvironmentKey(options.providerId);
   const configured =
     Boolean(environmentKey && process.env[environmentKey]?.trim()) ||
@@ -220,7 +234,30 @@ export async function runAuthCommand(
     await promptAndStoreKey(options.baseUrl, options.modelId);
     return;
   }
+  if (options.providerId === "amazon-bedrock") {
+    await verifyAmazonBedrockCredentials(options.modelId);
+    return;
+  }
   await loginWithProvider(options.providerId);
+}
+
+async function verifyAmazonBedrockCredentials(modelId: string): Promise<void> {
+  process.stdout.write(`${pc.bold("Amazon Bedrock")}\n`);
+  process.stdout.write(pc.dim("Checking AWS credentials via default provider chain… "));
+  try {
+// @ts-ignore
+    const { fromNodeProviderChain } = await import("@aws-sdk/credential-provider-node");
+    const provider = fromNodeProviderChain();
+    await provider();
+    process.stdout.write(`${pc.green("verified")}\n`);
+    await saveDefaultModelSelection("amazon-bedrock", modelId);
+    process.stdout.write(
+      `${pc.green("✓")} AWS credentials found. amazon-bedrock/${modelId} is now the default.\n`,
+    );
+  } catch (error) {
+    process.stdout.write(`${pc.red("failed")}\n`);
+    throw new Error(`AWS credentials not found: ${error instanceof Error ? error.message : String(error)}. Please configure them via AWS CLI or environment variables.`);
+  }
 }
 
 async function promptAndStoreKey(baseUrl: string, modelId: string): Promise<string> {

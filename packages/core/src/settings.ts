@@ -11,6 +11,7 @@ interface DSCodeSettings {
   deepseek?: {
     baseUrl?: unknown;
   };
+  serviceTier?: unknown;
 }
 
 export function getDSCodeSettingsPath(): string {
@@ -51,6 +52,41 @@ export async function saveDeepSeekBaseUrl(
     await unlink(temporaryPath).catch(() => undefined);
   }
   return normalized;
+}
+
+export function getStoredServiceTier(
+  settingsPath = getDSCodeSettingsPath(),
+): string | undefined {
+  try {
+    const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")) as DSCodeSettings;
+    return typeof settings.serviceTier === "string" ? settings.serviceTier : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function saveServiceTier(
+  tier: string | undefined,
+  settingsPath = getDSCodeSettingsPath(),
+): Promise<void> {
+  const settings = await readSettings(settingsPath);
+  if (tier) {
+    settings.serviceTier = tier;
+  } else {
+    delete settings.serviceTier;
+  }
+  const directory = path.dirname(settingsPath);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await chmod(directory, 0o700).catch(() => undefined);
+  const temporaryPath = `${settingsPath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
+    await chmod(temporaryPath, 0o600);
+    await rename(temporaryPath, settingsPath);
+    await chmod(settingsPath, 0o600);
+  } finally {
+    await unlink(temporaryPath).catch(() => undefined);
+  }
 }
 
 export function normalizeDeepSeekBaseUrl(value: string): string {

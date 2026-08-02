@@ -4,6 +4,7 @@ export {
   runDSCodeProcess,
 } from "./cli-runtime.js";
 export { createDSCodeExtension } from "./dscode-extension.js";
+export { registerDiscoveryCommands } from "./discovery.js";
 export {
   createDSCodeRpcClient,
   getDSCodeRpcEntryPath,
@@ -39,20 +40,27 @@ export {
   DEFAULT_DEEPSEEK_BASE_URL,
   getDSCodeSettingsPath,
   getStoredDeepSeekBaseUrl,
+  getStoredServiceTier,
   normalizeDeepSeekBaseUrl,
   saveDeepSeekBaseUrl,
+  saveServiceTier,
 } from "./settings.js";
 export {
   MODEL_CREDENTIAL_ENV_KEYS,
   SUPPORTED_PROVIDER_IDS,
+  buildModelGuidance,
+  chooseRecommendedModel,
   defaultEffortForProvider,
   defaultModelForProvider,
+  detectAvailableProviders,
   getStoredModelSelection,
   isSupportedProviderId,
   parseSupportedProviderId,
   providerDisplayName,
   providerEnvironmentKey,
+  saveModelSelection,
   stripModelCredentialEnvironment,
+  type ModelRecommendation,
   type StoredModelSelection,
   type SupportedProviderId,
 } from "./providers.js";
@@ -64,4 +72,64 @@ export {
   type ParsedRuntimeArgs,
   type SandboxMode,
 } from "./runtime-options.js";
+export {
+  SERVICE_TIERS,
+  normalizeServiceTier,
+  registerServiceTierControls,
+  resolveActiveServiceTier,
+  resolveProviderServiceTier,
+  type ServiceTier,
+} from "./service-tier.js";
+export {
+  formatWebSearchStatus,
+  getWebSearchConfigPath,
+  getWebSearchStatus,
+  loadWebSearchConfig,
+  resolveWebSearchExecution,
+  saveWebSearchConfig,
+  type ResolvedWebSearchExecution,
+  type WebSearchConfig,
+  type WebSearchProvider,
+  type WebSearchStatus,
+} from "./web-search.js";
+export {
+  WebSearchError,
+  executeWebSearch,
+  formatWebSearchResponse,
+  searchWithExa,
+  searchWithPerplexity,
+  type WebSearchExecOptions,
+  type WebSearchExecProvider,
+  type WebSearchHit,
+  type WebSearchResponse,
+} from "./web-search-providers.js";
+export {
+  CORE_PACKAGE_SOURCES,
+  OPTIONAL_PACKAGE_PRESETS,
+  formatPackageList,
+  getPackageSources,
+  listPackagePresets,
+  resolvePackageUpdateSources,
+  type OptionalPackagePresetName,
+} from "./packages.js";
+export { syncBundledAssets, type BootstrapSyncResult } from "./sync.js";
+export {
+  installSkills,
+  formatInstallSkillsResult,
+  resolveTargetDir,
+  type InstallSkillsOptions,
+  type InstallSkillsResult,
+  type SkillInstallTarget,
+} from "./skills-installer.js";
+export { runSetupWizard } from "./setup.js";
 export { DSCODE_VERSION } from "./version.js";
+export { collectStatusSnapshot, runDoctor, runDoctorCli, type DoctorOptions, type DSCodeStatusSnapshot } from "./doctor.js";
+export { createResearchRunReport, formatResearchRunMarkdown, type ResearchRunReport, type ResearchRunMetadata, type ResearchRunSection } from "./research-run.js";
+export {
+  searchArXiv,
+  searchHuggingFaceModels,
+  type ArXivResult,
+  type HuggingFaceModelResult,
+} from "./science-connectors.js";
+export * from "./workbench-types.js";
+export * from "./paper-rank.js";

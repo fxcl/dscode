@@ -22,6 +22,7 @@ import {
   SUPPORTED_PROVIDER_IDS,
   type SupportedProviderId,
 } from "./providers.js";
+import { loadWebSearchConfig } from "./web-search.js";
 
 export const sandboxModeSchema = z.enum(["read-only", "workspace-write", "danger-full-access"]);
 export type SandboxMode = z.infer<typeof sandboxModeSchema>;
@@ -70,7 +71,7 @@ export function parseRuntimeArgs(argv: string[]): ParsedRuntimeArgs {
   let permission = permissionSchema.parse(process.env.DSCODE_PERMISSION ?? "auto");
   let sandbox = sandboxModeSchema.parse(process.env.DSCODE_SANDBOX ?? "workspace-write");
   let network = false;
-  let webSearch = false;
+  let webSearch = loadWebSearchConfig().enabled;
   let activeTools: string[] | undefined;
   let toolsExplicit = false;
   let help = false;
@@ -225,11 +226,18 @@ Session and editor features:
 
 DSCode commands:
   /plan /permissions /effort /base-url /status /undo /checkpoints /diff /jobs /mcp /agents /doctor
+  /commands /tools /capabilities /service-tier /web-search
+
+Workflows (via --prompt-template):
+  code-review, refactor, test-gen, bugfix, migrate
 
 Authentication:
   dscode login [provider]           Sign in to a supported model provider
   dscode logout [provider]          Remove the selected provider credential
   dscode auth status                Show credential sources without revealing secrets
+  dscode setup                      Interactive setup wizard
+  dscode packages [list]            List available Pi package presets
+  dscode install-skills [target]    Copy bundled skills to codex|claude|opencode|repo
   /login                            Choose a provider interactively
   /login <provider>                 Authenticate a specific provider
 `);

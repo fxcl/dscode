@@ -14,7 +14,11 @@ const agentTaskSchema = Type.Object({
     Type.Literal("explorer"),
     Type.Literal("implementer"),
     Type.Literal("reviewer"),
+    Type.Literal("verifier"),
     Type.Literal("tester"),
+    Type.Literal("deep-research"),
+    Type.Literal("code-auditor"),
+    Type.Literal("paper-reviewer"),
   ]),
   task: Type.String({ minLength: 1 }),
 });
@@ -22,7 +26,15 @@ const delegateSchema = Type.Object({
   tasks: Type.Array(agentTaskSchema, { minItems: 1, maxItems: 8 }),
 });
 
-type AgentRole = "explorer" | "implementer" | "reviewer" | "tester";
+type AgentRole =
+  | "explorer"
+  | "implementer"
+  | "reviewer"
+  | "verifier"
+  | "tester"
+  | "deep-research"
+  | "code-auditor"
+  | "paper-reviewer";
 
 interface SubagentResult {
   role: AgentRole;
@@ -107,9 +119,13 @@ export function registerSubagentTools(
       ctx.ui.notify(
         [
           "explorer: read-only repository investigation",
-          "reviewer: read-only review",
+          "reviewer: read-only review with severity ratings (FATAL, MAJOR, MINOR)",
+          "verifier: read-only evidence and assertion validator",
           "tester: sandboxed test/diagnostic run",
           "implementer: isolated detached Git worktree; returns diff",
+          "deep-research: comprehensive multi-step technical/paper/code research, web search synthesis, and literature review",
+          "code-auditor: deep security, architecture, and code quality audit",
+          "paper-reviewer: analyzing academic papers, algorithm implementations, and experimental code",
         ].join("\n"),
         "info",
       );
@@ -131,7 +147,13 @@ async function runSubagent(
     agentCwd = worktree;
   }
 
-  const readOnly = role === "explorer" || role === "reviewer";
+  const readOnly =
+    role === "explorer" ||
+    role === "reviewer" ||
+    role === "verifier" ||
+    role === "deep-research" ||
+    role === "code-auditor" ||
+    role === "paper-reviewer";
   const rolePrompt = `${roleInstructions(role)}
 
 Task:
@@ -297,11 +319,19 @@ function roleInstructions(role: AgentRole): string {
     case "explorer":
       return "You are a read-only repository explorer. Do not modify files.";
     case "reviewer":
-      return "You are an independent code reviewer. Do not modify files; prioritize correctness and regressions.";
+      return "You are an independent code reviewer. Do not modify files. Prioritize correctness, security, and regressions. Group findings by severity: [FATAL] for blocking bugs/regressions, [MAJOR] for unverified assumptions or missing tests, [MINOR] for code quality/style suggestions.";
+    case "verifier":
+      return "You are an evidence verification subagent. Validate claims, test assertions, build outputs, and file paths. Check that every claimed fix or test result is physically verified. Mark any unverified assertions as [UNVERIFIED] / TODO.";
     case "tester":
       return "You are a test and diagnostics agent. Run focused checks and diagnose failures.";
     case "implementer":
       return "You are an implementation agent in an isolated Git worktree. Make focused changes and run relevant checks.";
+    case "deep-research":
+      return "You are a deep-research subagent specialized in comprehensive multi-step technical/paper/code research, web search synthesis, and literature review.";
+    case "code-auditor":
+      return "You are a code-auditor subagent specialized in deep security, architecture, and code quality audit.";
+    case "paper-reviewer":
+      return "You are a paper-reviewer subagent specialized in analyzing academic papers, algorithm implementations, and experimental code.";
   }
 }
 

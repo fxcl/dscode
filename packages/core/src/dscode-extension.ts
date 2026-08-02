@@ -24,6 +24,7 @@ import { capturePatchCheckpoint, restoreCheckpoint, type PatchCheckpoint } from 
 import { permissionSchema, type PermissionMode } from "./config.js";
 import { optimizeDeepSeekResponsesPayload } from "./deepseek.js";
 import { registerDiagnosticsTool } from "./diagnostics.js";
+import { registerDiscoveryCommands } from "./discovery.js";
 import { registerNaturalExit } from "./exit.js";
 import { registerHooks } from "./hooks.js";
 import { registerLocalImageInput } from "./image-input.js";
@@ -44,6 +45,7 @@ import { defaultModelForProvider } from "./providers.js";
 import type { DSCodeRuntimeOptions } from "./runtime-options.js";
 import { executeSandboxedCommand, sandboxDescription } from "./sandbox.js";
 import { registerSessionCommands } from "./session-commands.js";
+import { registerServiceTierControls } from "./service-tier.js";
 import { formatStatusReport } from "./status.js";
 import { normalizeDeepSeekBaseUrl, saveDeepSeekBaseUrl } from "./settings.js";
 import { registerSubagentTools } from "./subagents.js";
@@ -55,6 +57,8 @@ import {
 } from "./tool-ui.js";
 import { createCodingTools } from "./tools.js";
 import { formatThinkingLabel, registerCodingTui } from "./tui-experience.js";
+import { formatWebSearchStatus, getWebSearchStatus, resolveWebSearchExecution, saveWebSearchConfig } from "./web-search.js";
+import { executeWebSearch, formatWebSearchResponse, type WebSearchExecOptions } from "./web-search-providers.js";
 import { Workspace } from "./workspace.js";
 
 const CHECKPOINT_ENTRY = "dscode-checkpoint";
@@ -160,6 +164,14 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
       registerLocalImageInput(pi);
       registerNaturalExit(pi);
       registerSessionCommands(pi);
+      registerServiceTierControls(pi);
+      registerDiscoveryCommands(pi);
+      registerWebSearchCommand(pi);
+      // Register the client-side web_search tool only when a non-DeepSeek provider
+      // with an API key is configured. DeepSeek performs web search server-side.
+      if (resolveWebSearchExecution()) {
+        registerWebSearchTool(pi);
+      }
       registerCommandTools(
         pi,
         processes,
@@ -666,6 +678,8 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
           const git = await pi
             .exec("git", ["branch", "--show-current"], { cwd: ctx.cwd })
             .catch(() => undefined);
+          const { resolveActiveServiceTier } = await import("./service-tier.js");
+          const { buildModelGuidance, getStoredModelSelection } = await import("./providers.js");
           ctx.ui.notify(
             formatStatusReport({
               provider: ctx.model?.provider ?? options.providerId,
@@ -690,6 +704,10 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
                   }
                 : undefined,
               entries: ctx.sessionManager.getEntries(),
+              tools: pi.getActiveTools(),
+              mcpServers: mcp.serverCount(),
+              serviceTier: resolveActiveServiceTier(),
+              guidance: buildModelGuidance(getStoredModelSelection()),
             }),
             "info",
           );
@@ -1251,6 +1269,177 @@ function engineeringInstructions(
   return instructions.join("\n");
 }
 
+function registerWebSearchCommand(pi: ExtensionAPI): void {
+  pi.registerCommand("web-search", {
+    description: "Show or configure persistent web search (on|off|provider <name>)",
+    handler: async (args, ctx) => {
+      const trimmed = args.trim();
+      if (!trimmed) {
+        ctx.ui.notify(formatWebSearchStatus(getWebSearchStatus()), "info");
+        return;
+      }
+      if (trimmed === "on" || trimmed === "enable") {
+        saveWebSearchConfig({ enabled: true });
+        ctx.ui.notify("Web search enabled. Restart DSCode to apply.", "info");
+        return;
+      }
+      if (trimmed === "off" || trimmed === "disable") {
+        saveWebSearchConfig({ enabled: false });
+        ctx.ui.notify("Web search disabled.", "info");
+        return;
+      }
+      if (trimmed.startsWith("provider ")) {
+        const provider = trimmed.slice("provider ".length).trim();
+        if (!["auto", "deepseek", "perplexity", "exa", "google", "gemini"].includes(provider)) {
+          ctx.ui.notify("Provider must be auto, deepseek, perplexity, exa, or google.", "warning");
+          return;
+        }
+        const targetProvider = provider === "gemini" ? "google" : (provider as any);
+        saveWebSearchConfig({ provider: targetProvider });
+        ctx.ui.notify(`Web search provider set to ${targetProvider}.`, "info");
+        return;
+      }
+      if (trimmed.startsWith("key ")) {
+        const rest = trimmed.slice("key ".length).trim();
+        const clearMatch = rest.match(/^clear\s+(perplexity|exa|google|gemini)$/);
+        if (clearMatch) {
+          const rawTarget = clearMatch[1] as string;
+          const target = rawTarget === "gemini" ? "google" : rawTarget;
+          const fieldMap: Record<string, string> = {
+            perplexity: "perplexityApiKey",
+            exa: "exaApiKey",
+            google: "googleApiKey",
+          };
+          const field = fieldMap[target]!;
+          saveWebSearchConfig({ [field]: undefined } as any);
+          ctx.ui.notify(`Cleared ${target} API key.`, "info");
+          return;
+        }
+        const keyMatch = rest.match(/^(perplexity|exa|google|gemini)\s+(.+)$/s);
+        if (!keyMatch) {
+          ctx.ui.notify("Use: /web-search key <perplexity|exa|google> <key>, or /web-search key clear <perplexity|exa|google>", "warning");
+          return;
+        }
+        const rawTarget = keyMatch[1] as string;
+        const target = rawTarget === "gemini" ? "google" : rawTarget;
+        const value = keyMatch[2]?.trim() ?? "";
+        if (!value) {
+          ctx.ui.notify("API key must not be empty.", "warning");
+          return;
+        }
+        const fieldMap: Record<string, string> = {
+          perplexity: "perplexityApiKey",
+          exa: "exaApiKey",
+          google: "googleApiKey",
+        };
+        const field = fieldMap[target]!;
+        saveWebSearchConfig({ [field]: value } as any);
+        // Never echo the secret back; confirm only the provider.
+        ctx.ui.notify(`${target} API key saved.`, "info");
+        return;
+      }
+      ctx.ui.notify(
+        "Use: /web-search, /web-search on|off, /web-search provider <auto|deepseek|perplexity|exa|google>, /web-search key <perplexity|exa|google> <key>, /web-search key clear <perplexity|exa|google>",
+        "warning",
+      );
+    },
+  });
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Structured details for the client-side web_search tool results. */
+type WebSearchToolDetails = {
+  provider?: "exa" | "perplexity" | "google";
+  query?: string;
+  hitCount?: number;
+  error?: string;
+};
+
+function registerWebSearchTool(pi: ExtensionAPI): void {
+  pi.registerTool({
+    name: "web_search",
+    label: "Web search",
+    description:
+      "Search the web using the configured Perplexity or Exa provider for current information, documentation, or facts outside the codebase.",
+    promptSnippet: "web_search: look up current information on the web via Perplexity or Exa",
+    promptGuidelines: [
+      "Use web_search for current documentation, release notes, or facts outside the codebase.",
+      "Do not use web_search for information already present in the workspace; prefer read or grep first.",
+    ],
+    parameters: Type.Object({
+      query: Type.String({ description: "The search query." }),
+      numResults: Type.Optional(
+        Type.Integer({
+          description: "Maximum number of results to return. Defaults to 5.",
+          minimum: 1,
+          maximum: 20,
+        }),
+      ),
+    }),
+    renderShell: "self",
+    executionMode: "sequential",
+    async execute(_id, params, signal) {
+      const query = typeof params.query === "string" ? params.query.trim() : "";
+      if (!query) {
+        const details: WebSearchToolDetails = { error: "empty_query" };
+        return {
+          content: [{ type: "text", text: "Search query must not be empty." }],
+          details,
+          isError: true,
+        };
+      }
+      // Re-read config at call time so runtime changes via /web-search take effect
+      // without a restart, and so a stale setup never leaks an unconfigured call.
+      const resolved = resolveWebSearchExecution();
+      if (!resolved) {
+        const details: WebSearchToolDetails = { error: "not_configured" };
+        return {
+          content: [
+            {
+              type: "text",
+              text: [
+                "Web search is not configured for a client-side provider.",
+                "Run `/web-search provider perplexity` (or `exa`) and `/web-search key <provider> <key>`, then restart DSCode.",
+                "For DeepSeek, web search is handled server-side via the `--web` flag instead.",
+              ].join("\n"),
+            },
+          ],
+          details,
+          isError: true,
+        };
+      }
+      // Build options without undefined-valued keys (exactOptionalPropertyTypes).
+      const execOptions: WebSearchExecOptions = {};
+      if (signal) execOptions.signal = signal;
+      if (typeof params.numResults === "number" && Number.isFinite(params.numResults)) {
+        execOptions.numResults = Math.min(20, Math.max(1, Math.trunc(params.numResults)));
+      }
+      try {
+        const response = await executeWebSearch(resolved.provider, query, resolved.apiKey, execOptions);
+        const details: WebSearchToolDetails = {
+          provider: resolved.provider,
+          query,
+          hitCount: response.hits.length,
+        };
+        return {
+          content: [{ type: "text", text: formatWebSearchResponse(response) }],
+          details,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const details: WebSearchToolDetails = { provider: resolved.provider, error: message };
+        return {
+          content: [{ type: "text", text: `Web search failed: ${message}` }],
+          details,
+          isError: true,
+        };
+      }
+    },
+    renderCall(args, theme, context) {
+      return renderToolCall("Searched", String(args.query ?? ""), theme, context);
+    },
+  });
 }
