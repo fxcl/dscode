@@ -1,6 +1,7 @@
 import process from "node:process";
 import pc from "picocolors";
 import { ensureFirstRunAuth, runAuthCommand } from "./auth.js";
+import { installDSCodeCredentialStore } from "./credential-store.js";
 import { createDSCodeExtension } from "./dscode-extension.js";
 import { initializeDSCodeHome } from "./home.js";
 import { formatPackageList } from "./packages.js";
@@ -14,9 +15,18 @@ import { runSetupWizard } from "./setup.js";
 import { syncBundledAssets } from "./sync.js";
 import { ensureDSCodeUiDefaults } from "./ui-defaults.js";
 import { DSCODE_VERSION } from "./version.js";
+import {
+  parseWindowsSandboxLifecycleCommand,
+  runWindowsSandboxLifecycle,
+} from "./windows-sandbox.js";
 
 /** Run one DSCode CLI, JSON, or RPC process using the shared runtime. */
 export async function runDSCode(argv: string[]): Promise<void> {
+  const windowsSandboxCommand = parseWindowsSandboxLifecycleCommand(argv);
+  if (windowsSandboxCommand) {
+    runWindowsSandboxLifecycle(windowsSandboxCommand);
+    return;
+  }
   const parsed = parseRuntimeArgs(argv);
   if (parsed.help) {
     printDSCodeHelp();
@@ -91,6 +101,7 @@ export async function runDSCode(argv: string[]): Promise<void> {
   installPiLoginSecretMask();
   installPiMarkdownCodeBlocks();
   installDSCodeRuntimeBranding();
+  await installDSCodeCredentialStore();
 
   const { main } = await import("@earendil-works/pi-coding-agent");
   await main(parsed.piArgs, {
