@@ -164,4 +164,56 @@ describe("collectStatusSnapshot", () => {
     expect(snapshot.version.length).toBeGreaterThan(0);
     expect(snapshot.nodeVersion).toMatch(/^v\d+/);
   });
+
+  it("reports alpha login status as false when not configured", async () => {
+    const snapshot = await collectStatusSnapshot({ workingDir: tempWorkdir });
+
+    expect(snapshot.alphaLoggedIn).toBe(false);
+    expect(snapshot.alphaUser).toBeUndefined();
+  });
+
+  it("reports models.json path and existence", async () => {
+    const snapshot = await collectStatusSnapshot({ workingDir: tempWorkdir });
+
+    expect(snapshot.modelsJsonPath).toContain("models.json");
+    expect(snapshot.modelsJsonExists).toBe(false);
+    expect(snapshot.missingApiKeyProviders).toEqual([]);
+  });
+
+  it("detects models.json with missing apiKey providers", async () => {
+    await fs.writeFile(
+      path.join(tempHome, "models.json"),
+      JSON.stringify({
+        providers: {
+          "my-local": {
+            baseUrl: "http://localhost:1234",
+            models: [{ id: "model-a" }],
+          },
+          "with-key": {
+            baseUrl: "http://localhost:5678",
+            apiKey: "sk-test",
+            models: [{ id: "model-b" }],
+          },
+        },
+      }),
+    );
+
+    const snapshot = await collectStatusSnapshot({ workingDir: tempWorkdir });
+
+    expect(snapshot.modelsJsonExists).toBe(true);
+    expect(snapshot.missingApiKeyProviders).toEqual(["my-local"]);
+    expect(snapshot.missingApiKeyProviders).not.toContain("with-key");
+  });
+
+  it("reports bundled packages as not installed in a clean environment", async () => {
+    const snapshot = await collectStatusSnapshot({ workingDir: tempWorkdir });
+
+    expect(snapshot.hasBundledPackages).toBe(false);
+  });
+
+  it("reports service tier as undefined when not set", async () => {
+    const snapshot = await collectStatusSnapshot({ workingDir: tempWorkdir });
+
+    expect(snapshot.serviceTier).toBeUndefined();
+  });
 });

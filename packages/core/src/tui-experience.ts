@@ -43,6 +43,10 @@ export function registerCodingTui(
   pi: ExtensionAPI,
   options: DSCodeRuntimeOptions,
   getAccess: () => { permission: PermissionMode; sandbox: DSCodeRuntimeOptions["sandbox"]; network: boolean },
+  extras?: {
+    getMcpServerCount?: () => number;
+    getCommandCount?: () => number;
+  },
 ): void {
   let activeTui: TUI | undefined;
   let workingTimer: ReturnType<typeof setInterval> | undefined;
@@ -57,6 +61,12 @@ export function registerCodingTui(
     if (ctx.mode !== "tui") return;
     const modelId = model?.id ?? options.modelId;
     const modelName = model?.name;
+    const access = getAccess();
+    const contextUsage = ctx.getContextUsage();
+    const toolCount = pi.getActiveTools().length;
+    const commandCount = extras?.getCommandCount?.();
+    const mcpServers = extras?.getMcpServerCount?.();
+    const sessionName = ctx.sessionManager.getSessionName();
     ctx.ui.setHiddenThinkingLabel(formatThinkingLabel(modelName ?? modelId));
     ctx.ui.setHeader(
       (_tui, theme) =>
@@ -67,6 +77,16 @@ export function registerCodingTui(
             ...(modelName ? { modelName } : {}),
             effort: pi.getThinkingLevel(),
             version: DSCODE_VERSION,
+            permission: access.permission,
+            sandbox: access.sandbox,
+            network: access.network,
+            ...(contextUsage?.percent !== undefined && contextUsage?.percent !== null
+              ? { contextPercent: contextUsage.percent }
+              : {}),
+            toolCount,
+            ...(commandCount !== undefined ? { commandCount } : {}),
+            ...(mcpServers ? { mcpServers } : {}),
+            ...(sessionName ? { sessionName } : {}),
           },
           theme,
         ),

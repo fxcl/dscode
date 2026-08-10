@@ -3,6 +3,7 @@ import path from "node:path";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { brandBlue } from "./brand.js";
+import type { PermissionMode } from "./config.js";
 
 export interface WelcomeDetails {
   cwd: string;
@@ -14,6 +15,12 @@ export interface WelcomeDetails {
   commandCount?: number;
   mcpServers?: number;
   serviceTier?: string;
+  permission?: PermissionMode;
+  sandbox?: string;
+  network?: boolean;
+  contextPercent?: number | null;
+  sessionName?: string;
+  branch?: string;
 }
 
 /** Terminal pixel-art rendering of DSCode's block-whale logo. */
@@ -46,22 +53,26 @@ export function renderWelcome(width: number, details: WelcomeDetails, theme: The
   const padding = width >= 24 ? "  " : "";
   const gap = "   ";
   const logo = normalizeLogo(DSCODE_LOGO);
-  const capabilities = [
-    details.toolCount !== undefined ? `${details.toolCount} tools` : null,
-    details.commandCount !== undefined ? `${details.commandCount} commands` : null,
-    details.mcpServers ? `${details.mcpServers} mcp` : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-  const info = [
+
+  const info: string[] = [
     `${theme.bold("DSCode")} ${theme.fg("muted", `v${details.version}`)}`,
     theme.fg(
       "muted",
       `${details.modelName ?? humanizeModel(details.modelId)} · ${details.effort} effort`,
     ),
-    theme.fg("muted", formatCwd(details.cwd)),
-    ...(capabilities ? [theme.fg("dim", capabilities)] : []),
+    theme.fg("muted", formatCwdLabel(details)),
   ];
+
+  const accessLine = formatAccessLine(details, theme);
+  if (accessLine) info.push(accessLine);
+
+  const capsLine = formatCapsLine(details, theme);
+  if (capsLine) info.push(capsLine);
+
+  if (details.serviceTier) {
+    info.push(theme.fg("dim", `tier: ${details.serviceTier}`));
+  }
+
   const sideBySideWidth = visibleWidth(padding) + visibleWidth(logo[0] ?? "") + gap.length + 12;
   if (width < sideBySideWidth) {
     return [
@@ -76,6 +87,71 @@ export function renderWelcome(width: number, details: WelcomeDetails, theme: The
       theme.fg("dim", "…"),
     ),
   );
+}
+
+function formatCwdLabel(details: WelcomeDetails): string {
+  const cwdText = formatCwd(details.cwd);
+  const branchText = details.branch ? ` (${details.branch})` : "";
+  return `${cwdText}${branchText}`;
+}
+
+function formatAccessLine(
+  details: WelcomeDetails,
+  theme: Theme,
+): string | undefined {
+  if (details.permission === undefined) return undefined;
+  const parts: string[] = [];
+
+  if (details.permission === "plan") {
+    parts.push(theme.fg("warning", "plan"));
+  } else if (details.sandbox === "danger-full-access") {
+    parts.push(theme.fg("error", "danger full access"));
+  } else if (details.permission === "full") {
+    parts.push(theme.fg("warning", "full permission"));
+  } else {
+    parts.push(theme.fg("dim", details.permission));
+  }
+
+  if (details.network && details.sandbox !== "danger-full-access") {
+    parts.push(theme.fg("muted", "network"));
+  }
+
+  if (details.sessionName && details.sessionName !== "memory only") {
+    parts.push(theme.fg("dim", details.sessionName));
+  }
+
+  return parts.length > 0 ? parts.join(theme.fg("dim", " · ")) : undefined;
+}
+
+function formatCapsLine(
+  details: WelcomeDetails,
+  theme: Theme,
+): string | undefined {
+  const parts: string[] = [];
+
+  if (details.contextPercent !== undefined && details.contextPercent !== null) {
+    const pct = details.contextPercent;
+    const ctxStr = `ctx ${pct.toFixed(0)}%`;
+    if (pct >= 90) {
+      parts.push(theme.fg("error", ctxStr));
+    } else if (pct >= 70) {
+      parts.push(theme.fg("warning", ctxStr));
+    } else {
+      parts.push(theme.fg("dim", ctxStr));
+    }
+  }
+
+  if (details.toolCount !== undefined) {
+    parts.push(theme.fg("dim", `${details.toolCount} tools`));
+  }
+  if (details.commandCount !== undefined) {
+    parts.push(theme.fg("dim", `${details.commandCount} cmds`));
+  }
+  if (details.mcpServers) {
+    parts.push(theme.fg("dim", `${details.mcpServers} mcp`));
+  }
+
+  return parts.length > 0 ? parts.join(theme.fg("dim", " · ")) : undefined;
 }
 
 export function formatCwd(cwd: string): string {

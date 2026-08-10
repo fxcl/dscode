@@ -89,6 +89,28 @@ export {
   type SupportedProviderId,
 } from "./providers.js";
 export {
+  getModelsJsonPath,
+  upsertProviderBaseUrl,
+  upsertProviderConfig,
+  type ProviderConfigPatch,
+} from "./models-json.js";
+export {
+  bestEffortFetchOpenAiModelIds,
+  configureBedrockProvider,
+  configureCustomProvider,
+  configureProviderBaseUrl,
+  isLocalBaseUrl,
+  isLocalModelProvider,
+  normalizeBaseUrl,
+  normalizeCustomProviderBaseUrl,
+  normalizeModelIds,
+  normalizeProviderId,
+  resolveApiKeyConfig,
+  verifyCustomProvider,
+  type CustomProviderApi,
+  type CustomProviderSetup,
+} from "./provider-setup.js";
+export {
   parseRuntimeArgs,
   printDSCodeHelp,
   sandboxModeSchema,
@@ -139,6 +161,20 @@ export {
   resolvePackageUpdateSources,
   type OptionalPackagePresetName,
 } from "./packages.js";
+export {
+  getDSCodeNpmPrefixPath,
+  applyDSCodePackageManagerEnv,
+  getMissingConfiguredPackages,
+  installPackageSources,
+  updateConfiguredPackages,
+  seedBundledWorkspacePackages,
+  parseNpmSource,
+  dedupeNpmSources,
+  type InstallPackageSourcesResult,
+  type MissingConfiguredPackageSummary,
+  type NpmSource,
+  type UpdateConfiguredPackagesResult,
+} from "./package-ops.js";
 export { syncBundledAssets, type BootstrapSyncResult } from "./sync.js";
 export {
   installSkills,
@@ -149,6 +185,10 @@ export {
   type SkillInstallTarget,
 } from "./skills-installer.js";
 export { runSetupWizard } from "./setup.js";
+export { buildProjectAgentsTemplate, buildSessionLogsReadme } from "./project-init.js";
+export { registerAlphaTools } from "./alpha-tools.js";
+export { registerHuggingFaceTools } from "./huggingface-tools.js";
+export { extractPaperSections, type ExtractPaperSectionsResult } from "./alpha-sections.js";
 export { DSCODE_VERSION } from "./version.js";
 export { collectStatusSnapshot, runDoctor, runDoctorCli, type DoctorOptions, type DSCodeStatusSnapshot } from "./doctor.js";
 export { createResearchRunReport, formatResearchRunMarkdown, type ResearchRunReport, type ResearchRunMetadata, type ResearchRunSection } from "./research-run.js";

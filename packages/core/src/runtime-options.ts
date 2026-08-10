@@ -185,10 +185,25 @@ export function parseRuntimeArgs(argv: string[]): ParsedRuntimeArgs {
   };
 }
 
+const HF_TOOLS = [
+  "hf_dataset_info",
+  "hf_repo_files",
+  "hf_repo_read_file",
+];
+
+const ALPHA_TOOLS = [
+  "alpha_search",
+  "alpha_get_paper",
+  "alpha_ask_paper",
+  "alpha_annotate_paper",
+  "alpha_list_annotations",
+  "alpha_read_code",
+];
+
 function defaultActiveTools(harness: HarnessMode): string[] {
   const delegation = Number(process.env.DSCODE_SUBAGENT_DEPTH ?? "0") < 1 ? ["delegate"] : [];
   return harness === "minimal"
-    ? ["update_plan", "exec_command", "write_stdin", "apply_patch", "web_search", ...delegation]
+    ? ["update_plan", "exec_command", "write_stdin", "apply_patch", "web_search", ...ALPHA_TOOLS, ...HF_TOOLS, ...delegation]
     : [
         "update_plan",
         "read_file",
@@ -199,6 +214,8 @@ function defaultActiveTools(harness: HarnessMode): string[] {
         "write_stdin",
         "apply_patch",
         "web_search",
+        ...ALPHA_TOOLS,
+        ...HF_TOOLS,
         ...delegation,
       ];
 }
@@ -246,7 +263,10 @@ Authentication:
   dscode logout [provider]          Remove the selected provider credential
   dscode auth status                Show credential sources without revealing secrets
   dscode setup                      Interactive setup wizard
+  dscode provider [type]            Configure custom/local providers (LM Studio, LiteLLM, ...)
   dscode packages [list]            List available Pi package presets
+  dscode packages install <preset>  Install an optional Pi package preset
+  dscode packages update [preset]   Update installed Pi packages
   dscode install-skills [target]    Copy bundled skills to codex|claude|opencode|repo
   /login                            Choose a provider interactively
   /login <provider>                 Authenticate a specific provider

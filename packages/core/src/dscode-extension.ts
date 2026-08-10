@@ -31,6 +31,7 @@ import { registerLocalImageInput } from "./image-input.js";
 import { partitionSessionFile } from "./home.js";
 import { ManagedProcessRegistry, type ManagedProcessResult } from "./managed-process.js";
 import { MCPManager } from "./mcp.js";
+import { getBundledPackagesDir } from "./package-ops.js";
 import { applyWorkspacePatch, type ApplyPatchResult } from "./patch.js";
 import {
   formatPlanForExecution,
@@ -40,6 +41,9 @@ import {
   restorePlanState,
   type PlanState,
 } from "./plan.js";
+import { registerAlphaTools } from "./alpha-tools.js";
+import { registerHuggingFaceTools } from "./huggingface-tools.js";
+import { registerInitCommand, registerOutputsCommand } from "./project-init.js";
 import { discoverProjectCommands } from "./project-profile.js";
 import { registerDSCodeProjectTrust } from "./project-trust.js";
 import { defaultModelForProvider } from "./providers.js";
@@ -181,6 +185,10 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
       registerSessionCommands(pi);
       registerServiceTierControls(pi);
       registerDiscoveryCommands(pi);
+      registerInitCommand(pi);
+      registerOutputsCommand(pi);
+      registerAlphaTools(pi);
+      registerHuggingFaceTools(pi);
       registerWebSearchCommand(pi);
       // Always register the web_search tool so the agent always sees it.
       // The execute handler re-reads config at call time and returns a clear
@@ -212,7 +220,15 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
           ctx.ui.setWidget("dscode-plan", planWidgetLines(planState, ctx));
         },
       );
-      registerCodingTui(pi, options, () => ({ permission, ...effectiveAccess() }));
+      registerCodingTui(
+        pi,
+        options,
+        () => ({ permission, ...effectiveAccess() }),
+        {
+          getMcpServerCount: () => mcp.serverCount(),
+          getCommandCount: () => pi.getCommands().length,
+        },
+      );
 
       const applyPermissionTools = (): void => {
         if (permission === "plan") {
@@ -743,12 +759,33 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
         handler: async (_args, ctx) => {
           const usage = ctx.getContextUsage();
           const currentAccess = effectiveAccess();
+          const { resolveActiveServiceTier: resolveTier } = await import("./service-tier.js");
+          const { getModelsJsonPath } = await import("./models-json.js");
+          const { getDSCodeAgentDir } = await import("./auth.js");
+          const agentDir = getDSCodeAgentDir();
+          const modelsJsonPath = getModelsJsonPath(agentDir);
+          const fs = await import("node:fs");
+          const modelsJsonExists = fs.existsSync(modelsJsonPath);
+          const tier = resolveTier();
+
+          let alphaLine = "alphaXiv: not configured";
+          try {
+            const { isLoggedIn, getUserName } = await import("@companion-ai/alpha-hub/lib");
+            if (isLoggedIn()) {
+              const name = getUserName();
+              alphaLine = `alphaXiv: logged in${name ? ` (${name})` : ""}`;
+            }
+          } catch {}
+
+          const hasBundled = fs.existsSync(getBundledPackagesDir());
+
           ctx.ui.notify(
             [
               `model: ${ctx.model?.provider ?? "?"}/${ctx.model?.id ?? "?"}`,
               `transport: ${ctx.model?.api ?? options.transport}`,
               `image input: ${ctx.model?.input.includes("image") ? "supported" : "not supported"}`,
               `thinking: ${ctx.thinkingLevel ?? pi.getThinkingLevel()}`,
+              `service tier: ${tier ?? "not set"}`,
               `permission: ${permission}`,
               `sandbox: ${sandboxDescription({
                 mode: currentAccess.sandbox,
@@ -762,6 +799,9 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
                 ? `context: ${usage.tokens?.toLocaleString() ?? "?"}/${usage.contextWindow.toLocaleString()}`
                 : "context: unavailable",
               `checkpoints: ${checkpoints.length - undone.size} active`,
+              alphaLine,
+              `models.json: ${modelsJsonPath} ${modelsJsonExists ? "found" : "not found"}`,
+              `bundled packages: ${hasBundled ? "installed" : "not installed"}`,
               `mcp:\n${mcp.status()}`,
             ].join("\n"),
             "info",

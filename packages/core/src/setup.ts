@@ -1,7 +1,8 @@
 import process from "node:process";
+import { dirname, resolve } from "node:path";
 import pc from "picocolors";
 import type { AuthEvent, AuthInteraction } from "@earendil-works/pi-ai";
-import { authenticateProvider, getDSCodeAuthPath, saveDeepSeekKey, validateDeepSeekKey } from "./auth.js";
+import { authenticateProvider, getDSCodeAgentDir, getDSCodeAuthPath, saveDeepSeekKey, validateDeepSeekKey } from "./auth.js";
 import { getDSCodeHome } from "./home.js";
 import {
   chooseRecommendedModel,
@@ -20,18 +21,126 @@ import {
   promptSelect,
   promptText,
   promptSecret,
+  promptMultiSelect,
   SetupCancelledError,
   promptConfirm,
   type PromptSelectOption,
 } from "./setup-prompts.js";
-import { printAsciiHeader, printPanel, printInfo, printSuccess } from "./terminal-ui.js";
+import { printAsciiHeader, printPanel, printInfo, printSection, printSuccess, printWarning } from "./terminal-ui.js";
 import { saveDeepSeekBaseUrl, DEFAULT_DEEPSEEK_BASE_URL } from "./settings.js";
+import { listPackagePresets } from "./packages.js";
+import { getMissingConfiguredPackages, installPackageSources } from "./package-ops.js";
 
 function printNonInteractiveSetupGuidance(): void {
   printInfo("Non-interactive terminal detected. Use explicit commands:");
   printInfo("  dscode login <provider>");
   printInfo("  dscode --provider <id> --model <id>");
   printInfo("  # or configure API keys via env vars and rerun `dscode auth status`");
+}
+
+function summarizePackageSources(sources: string[]): string {
+  if (sources.length <= 3) {
+    return sources.join(", ");
+  }
+  return `${sources.slice(0, 3).join(", ")} +${sources.length - 3} more`;
+}
+
+async function maybeInstallBundledPackages(
+  workingDir: string,
+  agentDir: string,
+  appRoot: string,
+): Promise<void> {
+  const { missing, bundled } = getMissingConfiguredPackages(workingDir, agentDir, appRoot);
+  const userMissing = missing
+    .filter((entry) => entry.scope === "user")
+    .map((entry) => entry.source);
+  const projectMissing = missing
+    .filter((entry) => entry.scope === "project")
+    .map((entry) => entry.source);
+
+  printSection("Packages");
+  if (bundled.length > 0) {
+    printInfo(`Bundled packages ready: ${summarizePackageSources(bundled.map((entry) => entry.source))}`);
+  }
+
+  if (missing.length === 0) {
+    printInfo("No additional package install required.");
+    return;
+  }
+
+  printInfo(`Missing packages: ${summarizePackageSources(missing.map((entry) => entry.source))}`);
+  const shouldInstall = await promptConfirm("Install missing packages now?", true);
+  if (!shouldInstall) {
+    printInfo("Skipping package install. DSCode may install missing packages later if needed.");
+    return;
+  }
+
+  if (userMissing.length > 0) {
+    try {
+      await installPackageSources(workingDir, agentDir, userMissing);
+      printSuccess(`Installed bundled packages: ${summarizePackageSources(userMissing)}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      printInfo(
+        message.includes("No supported package manager found")
+          ? "No package manager available for additional installs."
+          : `Package install skipped: ${message}`,
+      );
+    }
+  }
+
+  if (projectMissing.length > 0) {
+    try {
+      await installPackageSources(workingDir, agentDir, projectMissing, { local: true });
+      printSuccess(`Installed project packages: ${summarizePackageSources(projectMissing)}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      printInfo(`Project package install skipped: ${message}`);
+    }
+  }
+}
+
+async function maybeInstallOptionalPackages(
+  workingDir: string,
+  agentDir: string,
+): Promise<void> {
+  const presets = listPackagePresets();
+  if (presets.length === 0) {
+    return;
+  }
+
+  const selectedPresets = await promptMultiSelect(
+    "Optional packages (memory, search, ...)",
+    presets.map((preset) => ({
+      value: preset.name,
+      label: preset.name,
+      hint: preset.description,
+    })),
+    [],
+  );
+
+  if (selectedPresets.length === 0) {
+    printInfo("No optional packages selected.");
+    return;
+  }
+
+  for (const presetName of selectedPresets) {
+    const preset = presets.find((entry) => entry.name === presetName);
+    if (!preset) continue;
+    try {
+      await installPackageSources(workingDir, agentDir, preset.sources, {
+        persist: true,
+      });
+      printSuccess(`Installed optional preset: ${preset.name}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      printInfo(
+        message.includes("No supported package manager found")
+          ? `Skipped optional preset ${preset.name}: no package manager available.`
+          : `Skipped optional preset ${preset.name}: ${message}`,
+      );
+    }
+  }
 }
 
 export async function runSetupWizard(): Promise<void> {
@@ -54,11 +163,12 @@ export async function runSetupWizard(): Promise<void> {
       printInfo("No provider API keys detected in environment.");
     }
 
-    const providerOptions: PromptSelectOption<SupportedProviderId | "skip">[] = [
+    const providerOptions: PromptSelectOption<SupportedProviderId | "custom" | "skip">[] = [
       ...SUPPORTED_PROVIDER_IDS.map(id => ({
         value: id,
         label: providerDisplayName(id),
       })),
+      { value: "custom", label: "Custom / Local provider (LM Studio, LiteLLM, ...)" },
       { value: "skip", label: "Skip this step" }
     ];
 
@@ -73,7 +183,15 @@ export async function runSetupWizard(): Promise<void> {
     let finalProviderId: SupportedProviderId | undefined;
 
     // 2. Auth
-    if (selectedProvider !== "skip") {
+    if (selectedProvider === "custom") {
+      printPanel("2. Custom Provider", ["Configure a custom or local model provider."]);
+      try {
+        const { configureCustomProvider } = await import("./provider-setup.js");
+        await configureCustomProvider();
+      } catch (error) {
+        printInfo(`Custom provider setup skipped: ${(error as Error).message}`);
+      }
+    } else if (selectedProvider !== "skip") {
       finalProviderId = selectedProvider;
       printPanel("2. Authentication", [`Configuring ${providerDisplayName(selectedProvider)}`]);
       
@@ -180,8 +298,20 @@ export async function runSetupWizard(): Promise<void> {
       printInfo("Set DSCODE_PROVIDER and DSCODE_MODEL env vars, or run `dscode login <provider>`.");
     }
 
+    // 4. Package Installation
+    printPanel("4. Packages", ["Install optional Pi packages for extended capabilities."]);
+    try {
+      const { fileURLToPath } = await import("node:url");
+      const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+      const agentDir = getDSCodeAgentDir();
+      await maybeInstallBundledPackages(process.cwd(), agentDir, appRoot);
+      await maybeInstallOptionalPackages(process.cwd(), agentDir);
+    } catch (error) {
+      printWarning(`Package setup skipped: ${(error as Error).message}`);
+    }
+
     // 5. Settings Summary
-    printPanel("4. Summary", ["Setup complete!"]);
+    printPanel("5. Summary", ["Setup complete!"]);
     printInfo(`Config directory: ${getDSCodeHome()}`);
     const finalSelection = getStoredModelSelection();
     if (finalSelection) {

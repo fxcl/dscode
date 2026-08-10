@@ -2,7 +2,7 @@ export const CORE_PACKAGE_SOURCES = [
   "npm:pi-web-access",
 ] as const;
 
-const NATIVE_PACKAGE_SOURCES = [
+export const NATIVE_PACKAGE_SOURCES = [
   "npm:@kaiserlich-dev/pi-session-search",
 ] as const;
 

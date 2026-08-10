@@ -94,4 +94,93 @@ describe("DSCode welcome header", () => {
     expect(visibleWidth(lines[0]!)).toBeLessThan(50);
     expect(lines).toHaveLength(5);
   });
+
+  it("shows permission, sandbox, and network status in the header", () => {
+    const output = renderWelcome(
+      100,
+      {
+        cwd: "/tmp/project",
+        modelId: "deepseek-v4-flash",
+        effort: "medium",
+        version: "0.3.0",
+        permission: "full",
+        sandbox: "workspace-write",
+        network: true,
+      },
+      theme,
+    ).join("\n");
+    expect(output).toContain("full permission");
+    expect(output).toContain("network");
+  });
+
+  it("shows danger full access in the header", () => {
+    const output = renderWelcome(
+      100,
+      {
+        cwd: "/tmp/project",
+        modelId: "deepseek-v4-flash",
+        effort: "medium",
+        version: "0.3.0",
+        permission: "full",
+        sandbox: "danger-full-access",
+        network: true,
+      },
+      theme,
+    ).join("\n");
+    expect(output).toContain("danger full access");
+  });
+
+  it("shows context percentage in the capabilities line", () => {
+    const output = renderWelcome(
+      100,
+      {
+        cwd: "/tmp/project",
+        modelId: "deepseek-v4-flash",
+        effort: "medium",
+        version: "0.3.0",
+        contextPercent: 45.3,
+        toolCount: 12,
+        commandCount: 8,
+        mcpServers: 2,
+      },
+      theme,
+    ).join("\n");
+    expect(output).toContain("ctx 45%");
+    expect(output).toContain("12 tools");
+    expect(output).toContain("8 cmds");
+    expect(output).toContain("2 mcp");
+  });
+
+  it("shows git branch next to cwd", () => {
+    const output = renderWelcome(
+      100,
+      {
+        cwd: "/tmp/project",
+        modelId: "deepseek-v4-flash",
+        effort: "medium",
+        version: "0.3.0",
+        branch: "main",
+      },
+      theme,
+    ).join("\n");
+    expect(output).toContain("(main)");
+  });
+
+  it("shows session name when not memory only", () => {
+    const output = renderWelcome(
+      100,
+      {
+        cwd: "/tmp/project",
+        modelId: "deepseek-v4-flash",
+        effort: "medium",
+        version: "0.3.0",
+        permission: "default",
+        sandbox: "workspace-write",
+        network: false,
+        sessionName: "feature-branch",
+      },
+      theme,
+    ).join("\n");
+    expect(output).toContain("feature-branch");
+  });
 });

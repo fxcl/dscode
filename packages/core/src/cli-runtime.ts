@@ -52,11 +52,83 @@ export async function runDSCode(argv: string[]): Promise<void> {
     const action = argv[1];
     if (!action || action === "list") {
       process.stdout.write(`${formatPackageList()}\n`);
-    } else {
-      process.stdout.write(
-        `Package ${action} requires the Pi runtime. Use --extension or npm directly.\n`,
-      );
+      return;
     }
+
+    if (action === "install") {
+      const target = argv[2];
+      if (!target) {
+        process.stderr.write("Usage: dscode packages install <preset|source>\n");
+        process.exitCode = 1;
+        return;
+      }
+      const { installPackageSources } = await import("./package-ops.js");
+      const { resolvePackageUpdateSources, getPackageSources } = await import("./packages.js");
+      const agentDir = await initializeDSCodeHome();
+      const cwd = parsed.options.cwd;
+      const sources = getPackageSources(target) ?? resolvePackageUpdateSources(target);
+      if (sources.length === 0) {
+        process.stderr.write(`Unknown package or preset: ${target}\n`);
+        process.exitCode = 1;
+        return;
+      }
+      process.stdout.write(`Installing ${sources.join(", ")}…\n`);
+      const result = await installPackageSources(cwd, agentDir, sources, { persist: true });
+      if (result.installed.length > 0) {
+        process.stdout.write(`Installed: ${result.installed.join(", ")}\n`);
+      }
+      if (result.skipped.length > 0) {
+        process.stdout.write(`Skipped: ${result.skipped.join(", ")}\n`);
+      }
+      return;
+    }
+
+    if (action === "update") {
+      const target = argv[2];
+      const { updateConfiguredPackages } = await import("./package-ops.js");
+      const agentDir = await initializeDSCodeHome();
+      const cwd = parsed.options.cwd;
+      const sources = target
+        ? (await import("./packages.js")).resolvePackageUpdateSources(target)
+        : undefined;
+      if (target && (!sources || sources.length === 0)) {
+        process.stderr.write(`Unknown package or preset: ${target}\n`);
+        process.exitCode = 1;
+        return;
+      }
+      process.stdout.write(
+        sources
+          ? `Updating ${sources.join(", ")}…\n`
+          : "Checking for available updates…\n",
+      );
+      const allUpdated: string[] = [];
+      const allSkipped: string[] = [];
+      if (sources && sources.length > 0) {
+        for (const source of sources) {
+          const result = await updateConfiguredPackages(cwd, agentDir, source);
+          allUpdated.push(...result.updated);
+          allSkipped.push(...result.skipped);
+        }
+      } else {
+        const result = await updateConfiguredPackages(cwd, agentDir);
+        allUpdated.push(...result.updated);
+        allSkipped.push(...result.skipped);
+      }
+      if (allUpdated.length > 0) {
+        process.stdout.write(`Updated: ${allUpdated.join(", ")}\n`);
+      } else {
+        process.stdout.write("Nothing to update.\n");
+      }
+      if (allSkipped.length > 0) {
+        process.stdout.write(`Skipped: ${allSkipped.join(", ")}\n`);
+      }
+      return;
+    }
+
+    process.stdout.write(
+      `Unknown packages action: ${action}. Use 'list', 'install', or 'update'.\n`,
+    );
+    process.exitCode = 1;
     return;
   }
   if (subcommand === "install-skills") {
@@ -67,6 +139,12 @@ export async function runDSCode(argv: string[]): Promise<void> {
 
     const res = await installSkills({ target, cwd: parsed.options.cwd });
     process.stdout.write(`${formatInstallSkillsResult(res)}\n`);
+    return;
+  }
+  if (subcommand === "provider") {
+    const { configureCustomProvider } = await import("./provider-setup.js");
+    const providerType = argv[1];
+    await configureCustomProvider(providerType);
     return;
   }
 

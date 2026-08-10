@@ -25,8 +25,11 @@ import {
 import { getDSCodeHome, getDSCodeSessionsDir } from "./home.js";
 import { getDSCodeSettingsPath } from "./settings.js";
 import { getWebSearchStatus } from "./web-search.js";
-import { getDSCodeAuthPath } from "./auth.js";
+import { getDSCodeAuthPath, getDSCodeAgentDir } from "./auth.js";
 import { DSCODE_VERSION } from "./version.js";
+import { getModelsJsonPath } from "./models-json.js";
+import { getBundledPackagesDir } from "./package-ops.js";
+import { resolveActiveServiceTier } from "./service-tier.js";
 
 export type DoctorOptions = {
   workingDir: string;
@@ -49,6 +52,13 @@ export type DSCodeStatusSnapshot = {
   hasMcpConfig: boolean;
   hasProjectInstructions: boolean;
   hasSkills: boolean;
+  alphaLoggedIn: boolean;
+  alphaUser?: string | undefined;
+  serviceTier?: string | undefined;
+  modelsJsonPath: string;
+  modelsJsonExists: boolean;
+  missingApiKeyProviders: string[];
+  hasBundledPackages: boolean;
 };
 
 export async function collectStatusSnapshot(options: DoctorOptions): Promise<DSCodeStatusSnapshot> {
@@ -78,6 +88,28 @@ export async function collectStatusSnapshot(options: DoctorOptions): Promise<DSC
 
   const modelValid = Boolean(storedSelection && availableProviders.includes(storedSelection.providerId));
 
+  let alphaLoggedIn = false;
+  let alphaUser: string | undefined;
+  try {
+    const { isLoggedIn, getUserName } = await import("@companion-ai/alpha-hub/lib");
+    alphaLoggedIn = isLoggedIn();
+    if (alphaLoggedIn) {
+      alphaUser = getUserName() ?? undefined;
+    }
+  } catch {}
+
+  const agentDir = getDSCodeAgentDir();
+  const modelsJsonPath = getModelsJsonPath(agentDir);
+  const modelsJsonExists = fs.existsSync(modelsJsonPath);
+  const missingApiKeyProviders = modelsJsonExists
+    ? findProvidersMissingApiKey(modelsJsonPath)
+    : [];
+
+  const serviceTier = resolveActiveServiceTier();
+
+  const bundledNpmDir = getBundledPackagesDir();
+  const hasBundledPackages = fs.existsSync(bundledNpmDir);
+
   return {
     version: DSCODE_VERSION,
     nodeVersion: process.version,
@@ -95,6 +127,13 @@ export async function collectStatusSnapshot(options: DoctorOptions): Promise<DSC
     hasMcpConfig,
     hasProjectInstructions: hasAgentsMd || hasClaudeMd,
     hasSkills,
+    alphaLoggedIn,
+    ...(alphaUser ? { alphaUser } : {}),
+    ...(serviceTier ? { serviceTier } : {}),
+    modelsJsonPath,
+    modelsJsonExists,
+    missingApiKeyProviders,
+    hasBundledPackages,
   };
 }
 
@@ -152,6 +191,25 @@ export async function runDoctor(options: DoctorOptions): Promise<void> {
   printInfo(`Skills: ${snapshot.hasSkills ? "found" : "none found"}`);
   printInfo(`Web Search: ${snapshot.webSearchStatus}`);
   printInfo(`Sandbox: ${snapshot.sandboxMode}`);
+  printInfo(`Bundled packages: ${snapshot.hasBundledPackages ? GREEN + "✓" + RESET : "not installed"}`);
+
+  printSection("Alpha");
+  printInfo(`alphaXiv: ${snapshot.alphaLoggedIn ? GREEN + "✓" + RESET + " logged in" : RED + "✗" + RESET + " not configured"}`);
+  if (snapshot.alphaUser) {
+    printInfo(`  user: ${snapshot.alphaUser}`);
+  }
+
+  printSection("Custom Providers");
+  printInfo(`models.json: ${snapshot.modelsJsonPath} ${snapshot.modelsJsonExists ? GREEN + "✓" + RESET : RED + "✗" + RESET}`);
+  if (snapshot.missingApiKeyProviders.length > 0) {
+    printWarning(`Provider(s) missing apiKey: ${snapshot.missingApiKeyProviders.join(", ")}`);
+    printInfo("Custom providers need apiKey in models.json to be available.");
+  }
+  if (snapshot.serviceTier) {
+    printInfo(`Service tier: ${snapshot.serviceTier}`);
+  } else {
+    printInfo("Service tier: not set");
+  }
 
   printSection("Project");
   printInfo(`Working dir: ${options.workingDir}`);
@@ -184,4 +242,27 @@ export async function runDoctor(options: DoctorOptions): Promise<void> {
 
 export async function runDoctorCli(cwd: string): Promise<void> {
   await runDoctor({ workingDir: cwd });
+}
+
+function findProvidersMissingApiKey(modelsJsonPath: string): string[] {
+  try {
+    const raw = fs.readFileSync(modelsJsonPath, "utf8").trim();
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const providers = parsed?.providers;
+    if (!providers || typeof providers !== "object") return [];
+    const missing: string[] = [];
+    for (const [providerId, config] of Object.entries(providers as Record<string, unknown>)) {
+      if (!config || typeof config !== "object") continue;
+      const models = (config as Record<string, unknown>).models;
+      if (!Array.isArray(models) || models.length === 0) continue;
+      const apiKey = (config as Record<string, unknown>).apiKey;
+      if (typeof apiKey !== "string" || apiKey.trim().length === 0) {
+        missing.push(providerId);
+      }
+    }
+    return missing;
+  } catch {
+    return [];
+  }
 }
