@@ -1,0 +1,748 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import {
+  Puzzle,
+  Plus,
+  RotateCcw,
+  FolderOpen,
+  FileCode,
+  Trash2,
+  ArrowUpCircle,
+  Sparkles,
+  MessageSquareText,
+  Palette,
+  Wrench,
+  Info,
+  GripVertical,
+  PackageOpen,
+  Search,
+  Hammer,
+  Check
+} from 'lucide-react'
+import { CommunityPackageInfo, PackageInfo, PackageResource } from '@shared/types'
+import { useAppStore } from '../store'
+import { useT } from '../i18n'
+import { createSessionForCurrentProject } from '../lib/session'
+import Logo from '../components/Logo'
+
+type PendingAction =
+  | { kind: 'install' }
+  | { kind: 'remove' | 'update' | 'toggle'; source: string }
+  | null
+
+type DropZone = 'chassis' | 'rack' | 'trash'
+
+const PKG_DRAG_TYPE = 'application/x-omp-package'
+
+const RESOURCE_ICONS: Record<PackageResource['type'], typeof Wrench> = {
+  extension: Wrench,
+  skill: Sparkles,
+  prompt: MessageSquareText,
+  theme: Palette
+}
+
+function hasPackageDrag(e: React.DragEvent): boolean {
+  return e.dataTransfer.types.includes(PKG_DRAG_TYPE)
+}
+
+function hasFileDrag(e: React.DragEvent | DragEvent): boolean {
+  return e.dataTransfer?.types.includes('Files') ?? false
+}
+
+export default function PackagesPage() {
+  const { packages, setPackages, updatePackageEnabled } = useAppStore()
+  const t = useT()
+  const [source, setSource] = useState('')
+  const [pending, setPending] = useState<PendingAction>(null)
+  const [log, setLog] = useState<{ ok: boolean; text: string } | null>(null)
+  const [confirmRemove, setConfirmRemove] = useState<string | null>(null)
+  const [dragSource, setDragSource] = useState<string | null>(null)
+  const [overZone, setOverZone] = useState<DropZone | null>(null)
+  const [fileDrag, setFileDrag] = useState(false)
+  const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const fileDragDepth = useRef(0)
+
+  const mounted = packages.filter((p) => p.enabled)
+  const parts = packages.filter((p) => !p.enabled)
+
+  const refresh = useCallback(async () => {
+    setPackages(await window.electronAPI.listPackages())
+  }, [setPackages])
+
+  useEffect(() => {
+    refresh()
+  }, [refresh])
+
+  useEffect(() => {
+    return () => {
+      if (confirmTimer.current) clearTimeout(confirmTimer.current)
+    }
+  }, [])
+
+  const run = async (action: PendingAction, fn: () => Promise<{ ok: boolean; log: string }>) => {
+    setPending(action)
+    const result = await fn()
+    setLog(result.log ? { ok: result.ok, text: result.log } : { ok: result.ok, text: '' })
+    await refresh()
+    setPending(null)
+  }
+
+  const handleInstall = async (target?: string) => {
+    const value = (target ?? source).trim()
+    if (!value || pending) return
+    setSource('')
+    await run({ kind: 'install' }, () => window.electronAPI.installPackage(value))
+  }
+
+  const handlePick = async (kind: 'folder' | 'file') => {
+    const picked =
+      kind === 'folder'
+        ? await window.electronAPI.selectFolder()
+        : await window.electronAPI.selectFile()
+    if (picked) handleInstall(picked)
+  }
+
+  const handleRemove = async (pkg: PackageInfo) => {
+    await run({ kind: 'remove', source: pkg.source }, () =>
+      window.electronAPI.removePackage(pkg.source)
+    )
+  }
+
+  const handleRemoveClick = async (pkg: PackageInfo) => {
+    if (confirmRemove !== pkg.source) {
+      setConfirmRemove(pkg.source)
+      if (confirmTimer.current) clearTimeout(confirmTimer.current)
+      confirmTimer.current = setTimeout(() => setConfirmRemove(null), 3000)
+      return
+    }
+    setConfirmRemove(null)
+    if (confirmTimer.current) clearTimeout(confirmTimer.current)
+    await handleRemove(pkg)
+  }
+
+  const handleUpdate = async (pkg: PackageInfo) => {
+    await run({ kind: 'update', source: pkg.source }, () =>
+      window.electronAPI.updatePackage(pkg.source)
+    )
+  }
+
+  const handleToggle = async (pkg: PackageInfo, next: boolean) => {
+    if (pending || pkg.enabled === next) return
+    updatePackageEnabled(pkg.source, next)
+    const result = await window.electronAPI.setPackageEnabled(pkg.source, next)
+    if (!result.ok) {
+      updatePackageEnabled(pkg.source, !next)
+      setLog({ ok: false, text: result.log })
+    }
+  }
+
+  const installDroppedFiles = async (files: FileList | File[]) => {
+    for (const file of Array.from(files)) {
+      const filePath = window.electronAPI.getPathForFile(file)
+      if (filePath) {
+        // eslint-disable-next-line no-await-in-loop
+        await handleInstall(filePath)
+      }
+    }
+  }
+
+  // Finder file drags get a full-window overlay; card drags use the zones.
+  useEffect(() => {
+    const onDragEnter = (e: DragEvent) => {
+      if (!hasFileDrag(e)) return
+      e.preventDefault()
+      fileDragDepth.current += 1
+      setFileDrag(true)
+    }
+    const onDragOver = (e: DragEvent) => {
+      if (hasFileDrag(e)) e.preventDefault()
+    }
+    const onDragLeave = (e: DragEvent) => {
+      if (!hasFileDrag(e)) return
+      fileDragDepth.current = Math.max(0, fileDragDepth.current - 1)
+      if (fileDragDepth.current === 0) setFileDrag(false)
+    }
+    const onDrop = (e: DragEvent) => {
+      if (!hasFileDrag(e)) return
+      e.preventDefault()
+      fileDragDepth.current = 0
+      setFileDrag(false)
+      if (e.dataTransfer?.files.length) installDroppedFiles(e.dataTransfer.files)
+    }
+    window.addEventListener('dragenter', onDragEnter)
+    window.addEventListener('dragover', onDragOver)
+    window.addEventListener('dragleave', onDragLeave)
+    window.addEventListener('drop', onDrop)
+    return () => {
+      window.removeEventListener('dragenter', onDragEnter)
+      window.removeEventListener('dragover', onDragOver)
+      window.removeEventListener('dragleave', onDragLeave)
+      window.removeEventListener('drop', onDrop)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pending])
+
+  const zoneDropProps = (zone: DropZone) => ({
+    onDragOver: (e: React.DragEvent) => {
+      if (pending || !hasPackageDrag(e)) return
+      e.preventDefault()
+      e.dataTransfer.dropEffect = zone === 'trash' ? 'move' : 'move'
+      setOverZone(zone)
+    },
+    onDragLeave: () => {
+      setOverZone((current) => (current === zone ? null : current))
+    },
+    onDrop: (e: React.DragEvent) => {
+      setOverZone(null)
+      setDragSource(null)
+      if (pending || !hasPackageDrag(e)) return
+      e.preventDefault()
+      const dragged = e.dataTransfer.getData(PKG_DRAG_TYPE)
+      const pkg = packages.find((p) => p.source === dragged)
+      if (!pkg) return
+      if (zone === 'chassis') handleToggle(pkg, true)
+      else if (zone === 'rack') handleToggle(pkg, false)
+      else handleRemove(pkg)
+    }
+  })
+
+  // Border color is chosen by state (not overridden) so the highlight wins
+  // regardless of utility order in the generated CSS.
+  const zoneClass = (zone: DropZone, base: string) => {
+    const state =
+      overZone === zone
+        ? zone === 'trash'
+          ? 'border-red-500/60 bg-red-500/10'
+          : 'border-accent/60 bg-accent-soft'
+        : zone === 'trash'
+          ? 'border-red-500/40'
+          : 'border-line-strong'
+    return `${base} transition ${state}`
+  }
+
+  return (
+    <div className="relative flex h-full flex-col overflow-hidden">
+      <header className="app-drag flex h-12 shrink-0 items-center justify-between border-b border-line px-4">
+        <div className="flex items-center gap-2.5">
+          <Puzzle size={15} className="text-accent" />
+          <span className="text-[13px] font-medium text-cream">{t('plugins.title')}</span>
+          <span className="text-xs text-cream-faint">{t('plugins.subtitle')}</span>
+        </div>
+        <button
+          onClick={refresh}
+          className="app-no-drag flex items-center gap-1.5 rounded-full border border-line px-3 py-1.5 text-[12px] text-cream-dim transition hover:border-ink-600 hover:text-cream"
+        >
+          <RotateCcw size={11} />
+          {t('plugins.refresh')}
+        </button>
+      </header>
+
+      <div className="flex-1 overflow-y-auto p-5 pb-20">
+        <div className="mx-auto max-w-[760px] space-y-4">
+          {/* Install */}
+          <section className="rounded-[16px] border border-line bg-ink-850 p-4 shadow-card">
+            <div className="mb-2.5 text-[11px] font-semibold uppercase tracking-wider text-cream-faint">
+              {t('plugins.installTitle')}
+            </div>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={source}
+                onChange={(e) => setSource(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleInstall()
+                }}
+                placeholder={t('plugins.installPlaceholder')}
+                disabled={pending !== null}
+                className="min-w-0 flex-1 rounded-lg border border-line bg-ink-900 px-3 py-2 font-mono text-[13px] text-cream outline-none transition-all placeholder:text-cream-faint focus:border-accent/50 focus:shadow-[0_0_0_3px_var(--accent-soft)] disabled:opacity-50"
+              />
+              <button
+                onClick={() => handlePick('folder')}
+                disabled={pending !== null}
+                title={t('plugins.browseFolder')}
+                className="flex shrink-0 items-center gap-1.5 rounded-full border border-line px-3 py-2 text-[12px] whitespace-nowrap text-cream-dim transition hover:border-ink-600 hover:text-cream disabled:opacity-50"
+              >
+                <FolderOpen size={12} />
+                {t('plugins.browseFolder')}
+              </button>
+              <button
+                onClick={() => handlePick('file')}
+                disabled={pending !== null}
+                title={t('plugins.browseFile')}
+                className="flex shrink-0 items-center gap-1.5 rounded-full border border-line px-3 py-2 text-[12px] whitespace-nowrap text-cream-dim transition hover:border-ink-600 hover:text-cream disabled:opacity-50"
+              >
+                <FileCode size={12} />
+                {t('plugins.browseFile')}
+              </button>
+              <button
+                onClick={() => handleInstall()}
+                disabled={!source.trim() || pending !== null}
+                className="flex shrink-0 items-center gap-1.5 rounded-full bg-cream px-4 py-2 text-[12px] font-medium whitespace-nowrap text-ink-950 transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <Plus size={12} />
+                {pending?.kind === 'install' ? t('plugins.installing') : t('plugins.install')}
+              </button>
+            </div>
+            {log && log.text && (
+              <pre
+                className={`mt-3 max-h-36 overflow-y-auto rounded-lg border px-3 py-2 font-mono text-[11px] leading-5 whitespace-pre-wrap ${
+                  log.ok
+                    ? 'border-line bg-ink-900 text-cream-dim'
+                    : 'border-red-500/30 bg-red-500/5 text-red-600 dark:text-red-300'
+                }`}
+              >
+                {log.text}
+              </pre>
+            )}
+          </section>
+
+          {/* How to assemble */}
+          <section className="rounded-[16px] border border-line bg-ink-850 px-4 py-3 shadow-card">
+            <div className="flex items-start gap-2.5">
+              <Info size={13} className="mt-0.5 shrink-0 text-accent" />
+              <div className="space-y-1 text-xs leading-5 text-cream-dim">
+                <div className="font-medium text-cream">{t('plugins.usageTitle')}</div>
+                <div>· {t('plugins.usage1')}</div>
+                <div>· {t('plugins.usage2')}</div>
+                <div>· {t('plugins.usage3')}</div>
+              </div>
+            </div>
+          </section>
+
+          {/* Chassis — mounted parts */}
+          <section
+            {...zoneDropProps('chassis')}
+            className={zoneClass(
+              'chassis',
+              'rounded-[18px] border-[1.5px] border-dashed bg-ink-850/60 p-4'
+            )}
+          >
+            <div className="mb-3 flex items-center gap-2.5">
+              <Logo size={28} className="shrink-0" />
+              <span className="text-[13px] font-semibold text-cream">{t('plugins.core')}</span>
+              <span className="rounded-full bg-accent-soft px-2 py-0.5 font-mono text-[10px] text-accent">
+                {t('plugins.mounted', { count: mounted.length })}
+              </span>
+            </div>
+            {mounted.length === 0 ? (
+              <div className="flex flex-col items-center gap-1.5 py-6 text-center">
+                <PackageOpen size={18} className="text-cream-faint" />
+                <span className="text-xs text-cream-dim">
+                  {packages.length === 0 ? t('plugins.empty') : t('plugins.emptyMounted')}
+                </span>
+                {packages.length === 0 && (
+                  <span className="text-[11px] text-cream-faint">{t('plugins.emptyHint')}</span>
+                )}
+              </div>
+            ) : (
+              <div className="grid gap-2.5">
+                {mounted.map((pkg) => (
+                  <PartCard
+                    key={pkg.source}
+                    pkg={pkg}
+                    pending={pending}
+                    confirmRemove={confirmRemove === pkg.source}
+                    onDragStateChange={setDragSource}
+                    onUpdate={() => handleUpdate(pkg)}
+                    onRemove={() => handleRemoveClick(pkg)}
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+
+          {/* Rack — detached parts */}
+          <section
+            {...zoneDropProps('rack')}
+            className={zoneClass('rack', 'rounded-[18px] border-[1.5px] border-dashed p-4')}
+          >
+            <div className="mb-3 flex items-center gap-2 px-1">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-cream-faint">
+                {t('plugins.rack')}
+              </span>
+              <span className="rounded-full bg-overlay-strong px-2 py-0.5 font-mono text-[10px] text-cream-dim">
+                {parts.length}
+              </span>
+            </div>
+            {parts.length === 0 ? (
+              <div className="py-4 text-center text-xs text-cream-faint">
+                {t('plugins.emptyParts')}
+              </div>
+            ) : (
+              <div className="grid gap-2.5">
+                {parts.map((pkg) => (
+                  <PartCard
+                    key={pkg.source}
+                    pkg={pkg}
+                    pending={pending}
+                    confirmRemove={confirmRemove === pkg.source}
+                    onDragStateChange={setDragSource}
+                    onUpdate={() => handleUpdate(pkg)}
+                    onRemove={() => handleRemoveClick(pkg)}
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+
+          {/* Discover — curated picks, community search, build-your-own */}
+          <DiscoverSection packages={packages} pending={pending} onInstall={handleInstall} />
+        </div>
+      </div>
+
+      {/* Uninstall drop zone — appears while dragging a part */}
+      {dragSource !== null && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center pb-5">
+          <div
+            {...zoneDropProps('trash')}
+            className={zoneClass(
+              'trash',
+              'pointer-events-auto flex items-center gap-2 rounded-xl border-[1.5px] border-dashed bg-ink-850 px-6 py-3 text-xs font-medium text-red-600 dark:text-red-300'
+            )}
+          >
+            <Trash2 size={14} />
+            {t('plugins.trashZone')}
+          </div>
+        </div>
+      )}
+
+      {/* Finder file drop overlay */}
+      {fileDrag && (
+        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-ink-950/40 backdrop-blur-sm">
+          <div className="flex items-center gap-2.5 rounded-xl border-2 border-dashed border-accent bg-ink-850 px-8 py-5 text-sm font-medium text-accent">
+            <PackageOpen size={18} />
+            {t('plugins.dropToInstall')}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function PartCard({
+  pkg,
+  pending,
+  confirmRemove,
+  onDragStateChange,
+  onUpdate,
+  onRemove
+}: {
+  pkg: PackageInfo
+  pending: PendingAction
+  confirmRemove: boolean
+  onDragStateChange: (source: string | null) => void
+  onUpdate: () => void
+  onRemove: () => void
+}) {
+  const t = useT()
+  const busy = pending !== null && 'source' in pending && pending.source === pkg.source
+  const removing = busy && pending?.kind === 'remove'
+  const updating = busy && pending?.kind === 'update'
+  const updatable = pkg.kind !== 'local' && !pkg.pinned
+  const [dragging, setDragging] = useState(false)
+
+  return (
+    <div
+      draggable={pending === null}
+      onDragStart={(e) => {
+        e.dataTransfer.setData(PKG_DRAG_TYPE, pkg.source)
+        e.dataTransfer.effectAllowed = 'move'
+        setDragging(true)
+        onDragStateChange(pkg.source)
+      }}
+      onDragEnd={() => {
+        setDragging(false)
+        onDragStateChange(null)
+      }}
+      className={`group rounded-xl border bg-ink-850 p-3.5 transition ${
+        dragging ? 'border-accent/50 opacity-50' : 'border-line hover:border-ink-600 hover:shadow-card'
+      } ${pkg.enabled ? '' : 'opacity-70'}`}
+    >
+      <div className="flex items-start gap-2.5">
+        <GripVertical
+          size={14}
+          className="mt-0.5 shrink-0 cursor-grab text-cream-faint transition group-hover:text-cream-dim active:cursor-grabbing"
+        />
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span
+              className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                pkg.enabled ? 'bg-emerald-500' : 'bg-cream-faint/50'
+              }`}
+            />
+            <span className="text-[13px] font-semibold text-cream">{pkg.name}</span>
+            {pkg.version && (
+              <span className="rounded-full bg-overlay-strong px-1.5 py-0.5 font-mono text-[10px] text-cream-dim">
+                {pkg.version}
+              </span>
+            )}
+            <span className="rounded-full bg-accent-soft px-1.5 py-0.5 font-mono text-[10px] uppercase text-accent">
+              {pkg.kind === 'local' ? t('plugins.kind.local') : pkg.kind}
+            </span>
+            {pkg.pinned && (
+              <span className="rounded-full bg-overlay-strong px-1.5 py-0.5 text-[10px] text-cream-faint">
+                {t('plugins.pinned')}
+              </span>
+            )}
+          </div>
+          {pkg.description && (
+            <div className="mt-1 line-clamp-2 text-xs leading-5 text-cream-dim">
+              {pkg.description}
+            </div>
+          )}
+          {pkg.resources.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {pkg.resources.map((res, i) => {
+                const Icon = RESOURCE_ICONS[res.type]
+                return (
+                  <span
+                    key={`${res.type}-${res.name}-${i}`}
+                    className="flex items-center gap-1 rounded-md bg-overlay px-1.5 py-0.5 text-[10.5px] text-cream-dim"
+                  >
+                    <Icon size={10} className="text-cream-faint" />
+                    {t(`plugins.resource.${res.type}`)} · {res.name}
+                  </span>
+                )
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className="flex shrink-0 items-center gap-1.5">
+          {updatable && (
+            <button
+              onClick={onUpdate}
+              disabled={pending !== null}
+              title={updating ? t('plugins.updating') : t('plugins.update')}
+              className="rounded-md p-1.5 text-cream-faint transition hover:bg-overlay hover:text-cream disabled:opacity-50"
+            >
+              <ArrowUpCircle size={13} />
+            </button>
+          )}
+          <button
+            onClick={onRemove}
+            disabled={pending !== null}
+            title={
+              removing
+                ? t('plugins.removing')
+                : confirmRemove
+                  ? t('plugins.uninstallConfirm')
+                  : t('plugins.uninstall')
+            }
+            className={`rounded-md p-1.5 transition disabled:opacity-50 ${
+              confirmRemove
+                ? 'bg-red-500/10 text-red-600 dark:text-red-300'
+                : 'text-cream-faint hover:bg-red-500/10 hover:text-red-500'
+            }`}
+          >
+            <Trash2 size={13} />
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Discover — curated pi packages, live npm community search, and the
+ * build-your-own entry that jumps into a chat with a scaffold prompt.
+ */
+function DiscoverSection({
+  packages,
+  pending,
+  onInstall
+}: {
+  packages: PackageInfo[]
+  pending: PendingAction
+  onInstall: (source: string) => void
+}) {
+  const t = useT()
+  const navigate = useNavigate()
+  const [curated, setCurated] = useState<CommunityPackageInfo[] | null>(null)
+  const [query, setQuery] = useState('')
+  const [results, setResults] = useState<CommunityPackageInfo[] | null>(null)
+  const [searching, setSearching] = useState(false)
+
+  const isInstalled = (name: string) =>
+    packages.some((p) => {
+      if (p.kind !== 'npm') return false
+      const spec = p.source.replace(/^npm:/, '')
+      return spec === name || spec.startsWith(`${name}@`)
+    })
+
+  useEffect(() => {
+    let alive = true
+    window.electronAPI
+      .searchPackages('', true)
+      .then((list) => {
+        if (alive) setCurated(list)
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  // Debounced community search against the npm registry
+  useEffect(() => {
+    const q = query.trim()
+    if (!q) {
+      setResults(null)
+      setSearching(false)
+      return
+    }
+    setSearching(true)
+    const timer = setTimeout(() => {
+      window.electronAPI.searchPackages(q).then((list) => {
+        setResults(list)
+        setSearching(false)
+      })
+    }, 400)
+    return () => clearTimeout(timer)
+  }, [query])
+
+  const handleBuildOwn = async () => {
+    const id = await createSessionForCurrentProject()
+    if (!id) return
+    useAppStore.getState().setComposerPrefill(t('plugins.buildOwnPrompt'))
+    navigate('/')
+  }
+
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center gap-2 px-1">
+        <span className="text-[11px] font-medium uppercase tracking-wider text-cream-faint">
+          {t('plugins.discover')}
+        </span>
+      </div>
+
+      {/* Curated picks */}
+      {curated !== null &&
+        (curated.length === 0 ? (
+          <div className="rounded-[16px] border border-line bg-ink-850 px-4 py-3 text-xs text-cream-faint">
+            {t('plugins.curatedEmpty')}
+          </div>
+        ) : (
+          <div>
+            <div className="mb-2 px-1 text-[11px] font-medium text-cream-faint">
+              {t('plugins.curated')}
+            </div>
+            <div className="grid grid-cols-2 gap-2.5">
+              {curated.map((pkg) => (
+                <CommunityPackageCard
+                  key={pkg.name}
+                  pkg={pkg}
+                  installed={isInstalled(pkg.name)}
+                  disabled={pending !== null}
+                  onInstall={() => onInstall(`npm:${pkg.name}`)}
+                />
+              ))}
+            </div>
+          </div>
+        ))}
+
+      {/* Community search */}
+      <div className="rounded-[16px] border border-line bg-ink-850 p-4 shadow-card">
+        <div className="mb-2.5 text-[11px] font-semibold uppercase tracking-wider text-cream-faint">
+          {t('plugins.community')}
+        </div>
+        <div className="relative">
+          <Search
+            size={12}
+            className="absolute top-1/2 left-3 -translate-y-1/2 text-cream-faint"
+          />
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={t('plugins.communityPlaceholder')}
+            className="w-full rounded-full border border-line bg-ink-900 py-2 pr-3 pl-8 text-[12px] text-cream outline-none transition-all placeholder:text-cream-faint focus:border-accent/50 focus:shadow-[0_0_0_3px_var(--accent-soft)]"
+          />
+        </div>
+        {searching && <div className="mt-3 text-xs text-cream-faint">{t('plugins.searching')}</div>}
+        {!searching && results !== null && results.length === 0 && (
+          <div className="mt-3 text-xs text-cream-faint">{t('plugins.noResults')}</div>
+        )}
+        {!searching && results !== null && results.length > 0 && (
+          <div className="mt-3 grid gap-2.5">
+            {results.map((pkg) => (
+              <CommunityPackageCard
+                key={pkg.name}
+                pkg={pkg}
+                installed={isInstalled(pkg.name)}
+                disabled={pending !== null}
+                onInstall={() => onInstall(`npm:${pkg.name}`)}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Build your own */}
+      <button
+        onClick={handleBuildOwn}
+        className="flex w-full items-center gap-3 rounded-[16px] border border-dashed border-line px-4 py-3.5 text-left transition hover:border-accent/60 hover:bg-accent-soft"
+      >
+        <Hammer size={15} className="shrink-0 text-accent" />
+        <div className="min-w-0">
+          <div className="text-[13px] font-medium text-cream">{t('plugins.buildOwn')}</div>
+          <div className="mt-0.5 text-xs text-cream-dim">{t('plugins.buildOwnHint')}</div>
+        </div>
+      </button>
+    </section>
+  )
+}
+
+function CommunityPackageCard({
+  pkg,
+  installed,
+  disabled,
+  onInstall
+}: {
+  pkg: CommunityPackageInfo
+  installed: boolean
+  disabled: boolean
+  onInstall: () => void
+}) {
+  const t = useT()
+  return (
+    <div className="flex gap-3 rounded-[14px] border border-line bg-ink-850 p-3.5 transition-all duration-150 ease-standard hover:border-ink-600 hover:shadow-card">
+      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-accent-soft">
+        <Puzzle size={15} strokeWidth={1.8} className="text-accent" />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-cream">
+            {pkg.name}
+          </span>
+          {pkg.version && (
+            <span className="rounded-full bg-overlay-strong px-1.5 py-0.5 font-mono text-[10px] text-cream-dim">
+              {pkg.version}
+            </span>
+          )}
+        </div>
+        {pkg.description && (
+          <div className="mt-1 line-clamp-2 text-[12px] leading-5 text-cream-dim">
+            {pkg.description}
+          </div>
+        )}
+        <div className="mt-2.5 flex justify-end">
+          {installed ? (
+            <span className="flex items-center gap-1 rounded-full bg-accent-soft px-2 py-1 text-[10.5px] font-medium text-accent">
+              <Check size={10} />
+              {t('plugins.installed')}
+            </span>
+          ) : (
+            <button
+              onClick={onInstall}
+              disabled={disabled}
+              className="flex items-center gap-1 rounded-full border border-line px-2.5 py-1 text-[10.5px] text-cream-dim transition hover:border-ink-600 hover:text-cream disabled:opacity-50"
+            >
+              <Plus size={10} />
+              {t('plugins.install')}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
