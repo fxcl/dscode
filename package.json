@@ -52,7 +52,12 @@
     "check": "pnpm typecheck && pnpm test && pnpm build && pnpm package:check",
     "smoke:live": "pnpm build && node scripts/live-smoke.mjs",
     "features:live": "pnpm build && node scripts/live-features.mjs",
-    "acceptance:live": "pnpm check && node scripts/live-smoke.mjs && node scripts/live-features.mjs"
+    "acceptance:live": "pnpm check && node scripts/live-smoke.mjs && node scripts/live-features.mjs",
+    "gui:dev": "pnpm build && pnpm --dir gui dev",
+    "gui:build": "pnpm --dir gui build",
+    "gui:test": "pnpm --dir gui test",
+    "gui:typecheck": "pnpm --dir gui typecheck",
+    "gui:package": "pnpm --dir gui package"
   },
   "engines": {
     "node": ">=22.19.0"

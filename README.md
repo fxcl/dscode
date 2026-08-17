@@ -256,6 +256,25 @@ These transformations run only when the active provider is `deepseek`; other pro
 native runtime implementations. Provider API keys are stripped from commands, hooks, and stdio MCP
 server environments.
 
+## Desktop GUI
+
+DSCode ships a Codex-style desktop GUI under [`gui/`](gui/README.md) — an Electron app forked from
+[OMP GUI](https://github.com/taotao135791-bit/omp-gui) (MIT) that hosts the dscode runtime over
+`dscode --mode rpc` (no second agent runtime):
+
+```bash
+pnpm gui:dev          # build dscode + launch the GUI in dev mode
+pnpm gui:test         # hermetic unit tests
+pnpm --dir gui test:dscode   # real-binary RPC compatibility suite (isolated, credential-free)
+pnpm gui:build        # electron-vite production build
+pnpm gui:package      # electron-builder → gui/release/
+```
+
+The GUI auto-detects the `dscode` CLI (override with `DSCODE_BIN`), keeps all state in `~/.dscode`,
+lists/restores sessions from the on-disk transcripts, maps its permission modes onto dscode's
+`--exclude-tools`, and offers per-tool approval via a bundled extension. See
+[gui/README.md](gui/README.md) for details.
+
 ## Extensibility and automation
 
 - Hierarchical `AGENTS.md` and `CLAUDE.md` project instructions
