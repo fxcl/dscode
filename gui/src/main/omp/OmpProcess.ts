@@ -102,14 +102,18 @@ export function resolvePermissionMode(mode: PermissionMode): {
     case 'no-bash':
       return { excludeTools: DSCODE_EXEC_TOOLS.join(','), approval: { mode: 'off' } }
     case 'readonly':
+    case 'plan': // no native plan on pi - readonly tier is the closest safe tier
       return {
         excludeTools: [...DSCODE_EXEC_TOOLS, ...DSCODE_WRITE_TOOLS].join(','),
         approval: { mode: 'off' }
       }
     case 'ask':
       return { excludeTools: null, approval: { mode: 'writes', locale: getStore('language') } }
+    case 'auto':
     case 'full':
     default:
+      // pi has no native auto; without the approval extension every call runs
+      // freely — the closest tier (dscode's own default is `auto`).
       return { excludeTools: null, approval: { mode: 'off' } }
   }
 }
@@ -136,8 +140,15 @@ export function resolvePermissionModeDSCode(mode: PermissionMode): DSCodePermiss
   switch (mode) {
     case 'ask':
       return { permission: 'ask' }
+    case 'auto':
+      // Native default: auto-approves safe actions, still escalates
+      // sandbox/network boundaries through dialogs.
+      return { permission: 'auto' }
     case 'full':
       return { permission: 'full' }
+    case 'plan':
+      // Native: read-only until a plan is approved, then per-action prompts.
+      return { permission: 'plan' }
     case 'no-bash':
       return { tools: [...DSCODE_READONLY_TOOLS, ...DSCODE_WRITE_TOOLS].join(',') }
     case 'readonly':
@@ -159,6 +170,14 @@ export function buildDSCodeRuntimeArgs(): string[] {
   const sandbox = getStore('dscodeSandbox')
   if (sandbox === 'read-only' || sandbox === 'workspace-write' || sandbox === 'danger-full-access') {
     args.push('--sandbox', sandbox)
+  }
+  const transport = getStore('dscodeTransport')
+  if (transport === 'responses' || transport === 'chat') args.push('--transport', transport)
+  const baseUrl = getStore('dscodeBaseUrl')
+  // Strict shape guard before anything reaches argv: http(s) URL, no
+  // whitespace, bounded length (the runtime re-validates via zod).
+  if (typeof baseUrl === 'string' && /^https?:\/\/[^\s]+$/.test(baseUrl) && baseUrl.length <= 512) {
+    args.push('--base-url', baseUrl)
   }
   if (getStore('dscodeWebSearch') === true) args.push('--web')
   return args
@@ -191,11 +210,14 @@ export function resolvePermissionModeCurrent(mode: PermissionMode): CurrentPermi
     case 'no-bash':
       return { tools: OMP_NO_BASH_TOOLS.join(','), approvalMode: 'yolo' }
     case 'readonly':
+    case 'plan': // omp has no plan mode - readonly tier is the closest safe tier
       return { tools: OMP_READONLY_TOOLS.join(','), approvalMode: 'yolo' }
     case 'ask':
       return { approvalMode: 'always-ask' }
+    case 'auto':
     case 'full':
     default:
+      // omp has no native auto; yolo is the closest tier.
       return { approvalMode: 'yolo' }
   }
 }

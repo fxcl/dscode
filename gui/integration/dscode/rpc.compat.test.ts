@@ -10,6 +10,7 @@ import {
   createIsolatedOmpEnvironment,
   binaryAvailable,
   requireBinary,
+  runOmp,
   IsolatedRuntime
 } from './isolated-runtime'
 
@@ -99,6 +100,22 @@ describe('DSCode CLI — legacy RPC v1 profile', () => {
     }
   })
 
+  it('permission flags: native --permission plan spawns cleanly', async () => {
+    if (!available) return
+    const live = startSession(DSCODE_BIN, ['--permission', 'plan'])
+    try {
+      await waitFor(() => live.session.handshakeOutcome !== null, 20_000, 'handshake')
+      if (diedEarly(live)) {
+        throw new Error(`dscode RPC did not start: ${live.stderrTail().slice(-500)}`)
+      }
+      const state = await live.session.query({ type: 'get_state' })
+      expect(state?.success).toBe(true)
+    } finally {
+      live.session.kill()
+      live.iso.cleanup()
+    }
+  })
+
   it('permission flags: --tools allowlist (readonly) spawns cleanly', async () => {
     if (!available) return
     const live = startSession(DSCODE_BIN, [
@@ -118,11 +135,66 @@ describe('DSCode CLI — legacy RPC v1 profile', () => {
     }
   })
 
-  it('runtime flags: --harness/--sandbox spawn cleanly', async () => {
+  it('hot permission switch: /permissions executes locally, never reaches the model', async () => {
+    if (!available) return
+    const live = startSession(DSCODE_BIN)
+    try {
+      await waitFor(() => live.session.handshakeOutcome !== null, 20_000, 'handshake')
+      if (diedEarly(live)) {
+        throw new Error(`dscode RPC did not start: ${live.stderrTail().slice(-500)}`)
+      }
+      // Extension commands registered via pi.registerCommand run immediately
+      // (agent-session.js prompt(): handled before any model call). 'auto' has
+      // no escalation confirm; 'full' would open a confirm dialog.
+      const sent = live.session.sendPrompt('/permissions auto')
+      expect(sent).toBe(true)
+      // Give the runtime a moment to (mis)behave, then verify the command was
+      // handled locally: no agent turn started, session still responsive.
+      await new Promise((r) => setTimeout(r, 1500))
+      const agentInvoked = live.events.some((e) => e.type === 'message_start')
+      expect(agentInvoked).toBe(false)
+      const state = await live.session.query({ type: 'get_state' })
+      expect(state?.success).toBe(true)
+    } finally {
+      live.session.kill()
+      live.iso.cleanup()
+    }
+  })
+
+  it('packages remove: unknown source exits non-zero with a clean message', async () => {
+    if (!available) return
+    const iso = createIsolatedOmpEnvironment()
+    try {
+      const out = runOmp(iso.env, DSCODE_BIN, ['packages', 'remove', 'definitely-not-installed'])
+      expect(out).toContain('No configured package found')
+    } finally {
+      iso.cleanup()
+    }
+  })
+
+  it('permission flags: native --permission auto spawns cleanly', async () => {
+    if (!available) return
+    const live = startSession(DSCODE_BIN, ['--permission', 'auto'])
+    try {
+      await waitFor(() => live.session.handshakeOutcome !== null, 20_000, 'handshake')
+      if (diedEarly(live)) {
+        throw new Error(`dscode RPC did not start: ${live.stderrTail().slice(-500)}`)
+      }
+      const state = await live.session.query({ type: 'get_state' })
+      expect(state?.success).toBe(true)
+    } finally {
+      live.session.kill()
+      live.iso.cleanup()
+    }
+  })
+
+  it('runtime flags: --harness/--sandbox/--transport/--base-url spawn cleanly', async () => {
     if (!available) return
     const live = startSession(DSCODE_BIN, [
       '--harness', 'safe',
-      '--sandbox', 'workspace-write'
+      '--sandbox', 'workspace-write',
+      '--transport', 'chat',
+      '--base-url', 'https://api.deepseek.com'
     ])
     try {
       await waitFor(() => live.session.handshakeOutcome !== null, 20_000, 'handshake')

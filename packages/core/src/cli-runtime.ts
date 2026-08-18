@@ -83,6 +83,30 @@ export async function runDSCode(argv: string[]): Promise<void> {
       return;
     }
 
+    if (action === "remove") {
+      const target = argv[2];
+      if (!target) {
+        process.stderr.write("Usage: dscode packages remove <preset|source>\n");
+        process.exitCode = 1;
+        return;
+      }
+      const { removeConfiguredPackage } = await import("./package-ops.js");
+      const agentDir = await initializeDSCodeHome();
+      const removed = await removeConfiguredPackage(parsed.options.cwd, agentDir, target).catch(
+        (error: unknown) => {
+          process.stderr.write(`${(error as Error).message}\n`);
+          return false;
+        },
+      );
+      if (removed) {
+        process.stdout.write(`Removed: ${target}\n`);
+      } else {
+        process.stderr.write(`No configured package found for: ${target}\n`);
+        process.exitCode = 1;
+      }
+      return;
+    }
+
     if (action === "update") {
       const target = argv[2];
       const { updateConfiguredPackages } = await import("./package-ops.js");
@@ -126,7 +150,7 @@ export async function runDSCode(argv: string[]): Promise<void> {
     }
 
     process.stdout.write(
-      `Unknown packages action: ${action}. Use 'list', 'install', or 'update'.\n`,
+      `Unknown packages action: ${action}. Use 'list', 'install', 'update', or 'remove'.\n`,
     );
     process.exitCode = 1;
     return;

@@ -187,7 +187,7 @@ function sanitizeDialogFilters(value: unknown): { name: string; extensions: stri
 const SESSION_LEVELS: readonly SessionThinkingLevel[] = SESSION_THINKING_LEVELS
 const DEFAULT_LEVELS: readonly DefaultThinkingLevel[] = DEFAULT_THINKING_LEVELS
 
-const PERMISSION_MODES: PermissionMode[] = ['full', 'no-bash', 'readonly', 'ask']
+const PERMISSION_MODES: PermissionMode[] = ['full', 'no-bash', 'readonly', 'ask', 'plan', 'auto']
 
 /** Resolve a renderer-supplied grant id to a canonical realPath. */
 function requireGrant(id: unknown): { grant: WorkspaceGrant; realPath: string } | null {

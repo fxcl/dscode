@@ -385,36 +385,11 @@ const PI_COMMAND_TIMEOUT_MS = 5 * 60 * 1000
 
 /**
  * The dscode CLI nests package management under a `packages` subcommand
- * (`dscode packages install …`) while pi/omp take it at the top level
- * (`pi install …`). dscode also has no `remove` subcommand — removal goes
- * through settings.json directly (see removePackage).
+ * (`dscode packages install|update|remove …`) while pi/omp take it at the top
+ * level (`pi install …`).
  */
 function packageArgs(args: string[]): string[] {
   return detectCli().command === 'dscode' ? ['packages', ...args] : args
-}
-
-/**
- * Remove a package for the dscode runtime: drop its entry from the runtime's
- * own settings.json `packages` list. The runtime loads packages from that
- * list on startup, so removing the entry disables the package; any files it
- * left in the agent dir are inert (and reused if it is reinstalled).
- */
-function removePackageViaSettings(source: string): PackageActionResult {
-  const piAgentDir = defaultPiAgentDir()
-  const settings = readPiSettings(piAgentDir)
-  const packages = (settings.packages ?? []) as PackageEntry[]
-  const idx = packages.findIndex((entry) => entrySource(entry) === source)
-  if (idx === -1) {
-    return { ok: false, log: `package not found in settings: ${source}` }
-  }
-  packages.splice(idx, 1)
-  settings.packages = packages
-  try {
-    writePiSettings(piAgentDir, settings)
-    return { ok: true, log: '' }
-  } catch (err) {
-    return { ok: false, log: err instanceof Error ? err.message : String(err) }
-  }
 }
 
 function runPi(args: string[]): Promise<PackageActionResult> {
@@ -469,7 +444,8 @@ export function installPackage(source: string): Promise<PackageActionResult> {
 
 export function removePackage(source: string): Promise<PackageActionResult> {
   if (detectCli().command === 'dscode') {
-    return Promise.resolve(removePackageViaSettings(canonicalSourceForCommand(source, defaultPiAgentDir())))
+    // First-class CLI subcommand (runtime package manager: uninstall + settings)
+    return runPi(packageArgs(['remove', canonicalSourceForCommand(source, defaultPiAgentDir())]))
   }
   return runPi(['remove', canonicalSourceForCommand(source, defaultPiAgentDir())])
 }

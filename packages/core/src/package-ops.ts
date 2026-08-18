@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import path from "node:path";
 import {
   cpSync,
   existsSync,
@@ -558,6 +559,64 @@ export async function installPackageSources(
   }
 
   return { installed, skipped };
+}
+
+/**
+ * Remove one configured package through the runtime's own package manager
+ * (uninstall files + drop the settings entry). Local sources are stored as
+ * paths RELATIVE to the agent dir (verified live: install /tmp/apkg stores
+ * "../apkg"), so matching resolves every configured entry against the agent
+ * dir before comparing with the (absolute) requested path; the STORED form is
+ * then handed to removeAndPersist. Returns false when nothing matches.
+ */
+export async function removeConfiguredPackage(
+  workingDir: string,
+  agentDir: string,
+  source: string,
+  options?: { local?: boolean },
+): Promise<boolean> {
+  const { settingsManager, packageManager } = createPackageContext(workingDir, agentDir);
+  const configured = packageManager.listConfiguredPackages();
+  const wanted = source.startsWith("npm:") || source.startsWith("github:")
+    ? source
+    : path.resolve(source);
+  const match = configured.find((entry) => {
+    if (entry.source.startsWith("npm:") || entry.source.startsWith("github:")) {
+      return entry.source === wanted;
+    }
+    const absolute = path.isAbsolute(entry.source)
+      ? entry.source
+      : path.resolve(agentDir, entry.source);
+    return absolute === wanted;
+  });
+  if (!match) return false;
+  // setPackages() replaces the configured list with everything except the
+  // matched entry, then save() + flush() persist to disk. We deliberately do
+  // NOT use packageManager.removeAndPersist(): its internal identity match
+  // through packageSourcesMatch() fails on relative local sources like
+  // "../ap" (pi 0.83 bug), leaving the settings entry behind.
+  const scope = options?.local ? 'project' : 'user';
+  const current =
+    scope === 'project'
+      ? (settingsManager.getProjectSettings().packages ?? [])
+      : (settingsManager.getGlobalSettings().packages ?? []);
+  const next = current.filter((entry) => {
+    const entrySource = typeof entry === 'string' ? entry : entry.source;
+    return entrySource !== match.source;
+  });
+
+  // Uninstall the on-disk copy (no-op for plain local sources).
+  await packageManager
+    .remove(match.source, scope === 'project' ? { local: true } : {})
+    .catch(() => undefined);
+
+  if (scope === 'project') {
+    settingsManager.setProjectPackages(next);
+  } else {
+    settingsManager.setPackages(next);
+  }
+  await settingsManager.flush();
+  return true;
 }
 
 export async function updateConfiguredPackages(

@@ -11,9 +11,9 @@
     "preview": "electron-vite preview",
     "package": "electron-builder",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "test:dscode": "vitest run --config vitest.dscode.config.ts",
-    "test:dscode:live": "DSCODE_GUI_RUN_LIVE_TESTS=1 vitest run --config vitest.dscode.live.config.ts",
+    "test": "VITE_CJS_IGNORE_WARNING=true vitest run",
+    "test:dscode": "VITE_CJS_IGNORE_WARNING=true vitest run --config vitest.dscode.config.ts",
+    "test:dscode:live": "DSCODE_GUI_RUN_LIVE_TESTS=1 VITE_CJS_IGNORE_WARNING=true vitest run --config vitest.dscode.live.config.ts",
     "postinstall": "electron-builder install-app-deps"
   },
   "devDependencies": {

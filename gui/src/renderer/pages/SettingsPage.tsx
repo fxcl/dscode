@@ -46,7 +46,9 @@ const buttonCls =
 
 const PERMISSION_MODES: { value: PermissionMode; label: I18nKey; note: I18nKey }[] = [
   { value: 'ask', label: 'settings.permissions.ask', note: 'settings.permissionsNote.ask' },
+  { value: 'auto', label: 'settings.permissions.auto', note: 'settings.permissionsNote.auto' },
   { value: 'full', label: 'settings.permissions.full', note: 'settings.permissionsNote.full' },
+  { value: 'plan', label: 'settings.permissions.plan', note: 'settings.permissionsNote.plan' },
   { value: 'no-bash', label: 'settings.permissions.noBash', note: 'settings.permissionsNote.noBash' },
   { value: 'readonly', label: 'settings.permissions.readonly', note: 'settings.permissionsNote.readonly' }
 ]
@@ -66,6 +68,8 @@ export default function SettingsPage() {
     'workspace-write'
   )
   const [webSearch, setWebSearchState] = useState(false)
+  const [transport, setTransportState] = useState<'responses' | 'chat'>('responses')
+  const [baseUrl, setBaseUrlState] = useState('')
   const [updater, setUpdater] = useState<UpdaterStatus>({ status: 'idle' })
 
   // Runtime profile decides which settings surface applies: current (omp
@@ -95,6 +99,8 @@ export default function SettingsPage() {
     window.electronAPI.getStore('dscodeHarness').then((v) => setHarnessState(v ?? 'minimal'))
     window.electronAPI.getStore('dscodeSandbox').then((v) => setSandboxState(v ?? 'workspace-write'))
     window.electronAPI.getStore('dscodeWebSearch').then((v) => setWebSearchState(v ?? false))
+    window.electronAPI.getStore('dscodeTransport').then((v) => setTransportState(v ?? 'responses'))
+    window.electronAPI.getStore('dscodeBaseUrl').then((v) => setBaseUrlState(v ?? ''))
   }, [])
 
   useEffect(() => {
@@ -145,6 +151,23 @@ export default function SettingsPage() {
   const changeWebSearch = async (value: boolean) => {
     setWebSearchState(value)
     await window.electronAPI.setStore('dscodeWebSearch', value)
+  }
+
+  const changeTransport = async (value: 'responses' | 'chat') => {
+    setTransportState(value)
+    await window.electronAPI.setStore('dscodeTransport', value)
+  }
+
+  /** Persist a base-URL override; invalid shapes are ignored (kept in the box, not saved). */
+  const commitBaseUrl = async () => {
+    const clean = baseUrl.trim()
+    if (clean === '') {
+      setBaseUrlState('')
+      await window.electronAPI.setStore('dscodeBaseUrl', '')
+      return
+    }
+    if (!/^https?:\/\/[^\s]+$/.test(clean) || clean.length > 512) return
+    await window.electronAPI.setStore('dscodeBaseUrl', clean)
   }
 
   const checkUpdates = async () => {
@@ -334,6 +357,32 @@ export default function SettingsPage() {
                   {t('settings.off')}
                 </button>
               </div>
+            </Row>
+            <Row label={t('settings.transport')}>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => changeTransport('responses')}
+                  className={seg(transport === 'responses')}
+                >
+                  {t('settings.transportResponses')}
+                </button>
+                <button onClick={() => changeTransport('chat')} className={seg(transport === 'chat')}>
+                  {t('settings.transportChat')}
+                </button>
+              </div>
+            </Row>
+            <Row label={t('settings.baseUrl')}>
+              <input
+                value={baseUrl}
+                onChange={(e) => setBaseUrlState(e.target.value)}
+                onBlur={commitBaseUrl}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                }}
+                spellCheck={false}
+                placeholder="https://api.deepseek.com"
+                className="w-[240px] rounded-full border border-line bg-transparent px-3 py-1.5 font-mono text-[11.5px] text-cream placeholder:text-cream-faint focus:border-ink-600 focus:outline-none"
+              />
             </Row>
             <Note>{t('settings.dscodeRuntimeNote')}</Note>
           </Section>

@@ -1,0 +1,61 @@
+name: GUI Release
+
+# DSCode GUI desktop builds. Tag `gui-v*` (e.g. gui-v0.1.0) triggers a macOS
+# build of the monorepo (core CLI → Electron app) and publishes the artifacts
+# to the SAME GitHub Releases repo that electron-updater reads
+# (electron-builder.json → thinkany-ai/dscode). Signs/notarizes only when the
+# matching secrets are configured — otherwise an ad-hoc build is produced.
+
+on:
+  push:
+    tags:
+      - 'gui-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  gui-release:
+    name: Build + package (macOS)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: gui
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build the dscode CLI (core dependency of the GUI)
+        working-directory: .
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build:core
+
+      - name: Install GUI dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Verify (typecheck + unit tests)
+        run: |
+          pnpm typecheck
+          pnpm test
+
+      - name: Build the Electron app
+        run: pnpm build
+
+      - name: Package and publish (signs/notarizes when secrets are configured)
+        run: pnpm package --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Empty when not configured → an unsigned (ad-hoc) build is produced.
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}

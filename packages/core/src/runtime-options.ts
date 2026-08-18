@@ -267,6 +267,7 @@ Authentication:
   dscode packages [list]            List available Pi package presets
   dscode packages install <preset>  Install an optional Pi package preset
   dscode packages update [preset]   Update installed Pi packages
+  dscode packages remove <source>   Uninstall a configured package
   dscode install-skills [target]    Copy bundled skills to codex|claude|opencode|repo
   /login                            Choose a provider interactively
   /login <provider>                 Authenticate a specific provider

@@ -6,14 +6,17 @@ import { I18nKey, useT } from '../i18n'
 import MenuPortal from './MenuPortal'
 
 /**
- * Permission-mode pill in the composer toolbar. ask/full flip the live
- * session's approval config on the spot (the extension re-reads it per tool
- * call); no-bash/readonly are spawn-time --exclude-tools, so they're flagged
- * as new-session-only.
+ * Permission-mode pill in the composer toolbar. ask/full/plan hot-swap the live
+ * session: legacy pi re-reads the approval config per tool call; dscode
+ * executes its native `/permissions` command immediately (even while
+ * streaming). no-bash/readonly change the tool set, which is spawn-time
+ * only — they're flagged as new-session-only.
  */
 const MODES: { value: PermissionMode; labelKey: I18nKey; noteKey?: I18nKey }[] = [
   { value: 'ask', labelKey: 'settings.permissions.ask' },
+  { value: 'auto', labelKey: 'settings.permissions.auto' },
   { value: 'full', labelKey: 'settings.permissions.full' },
+  { value: 'plan', labelKey: 'settings.permissions.plan', noteKey: 'composer.permissionPlan' },
   { value: 'no-bash', labelKey: 'settings.permissions.noBash', noteKey: 'composer.permissionNewSession' },
   { value: 'readonly', labelKey: 'settings.permissions.readonly', noteKey: 'composer.permissionNewSession' }
 ]

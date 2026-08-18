@@ -602,7 +602,7 @@ export type ToolAccess = 'full' | 'no-bash' | 'readonly'
  * 'full'/'no-bash'/'readonly' map to --exclude-tools; 'ask' leaves every tool
  * enabled and gates each call through the bundled approval extension.
  */
-export type PermissionMode = 'full' | 'no-bash' | 'readonly' | 'ask'
+export type PermissionMode = 'full' | 'no-bash' | 'readonly' | 'ask' | 'plan' | 'auto'
 
 /** pi package source flavor, derived from the source string in settings.json */
 export type PackageSourceKind = 'npm' | 'git' | 'local'
@@ -668,6 +668,10 @@ export interface AppSettings {
   dscodeSandbox: 'read-only' | 'workspace-write' | 'danger-full-access'
   /** DSCode runtime: DeepSeek server-side web search for new sessions (--web). */
   dscodeWebSearch: boolean
+  /** DSCode runtime: model API transport for new sessions (--transport). */
+  dscodeTransport: 'responses' | 'chat'
+  /** DSCode runtime: DeepSeek-compatible API endpoint override (--base-url). */
+  dscodeBaseUrl: string
 }
 
 export type InstallStatus =
@@ -697,7 +701,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   archivedSessionIds: [],
   dscodeHarness: 'minimal',
   dscodeSandbox: 'workspace-write',
-  dscodeWebSearch: false
+  dscodeWebSearch: false,
+  dscodeTransport: 'responses',
+  dscodeBaseUrl: ''
 }
 
 /** Snapshot of a live session, from the RPC get_state command. */

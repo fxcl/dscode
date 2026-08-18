@@ -353,14 +353,32 @@ export async function setThinkingLevel(sessionId: string, level: SessionThinking
 }
 
 /**
- * Rewrite the approval extension config of a live session. The extension
- * re-reads the file (mtime-cached) on every tool call, so 'ask' ↔ 'off'
- * flips apply mid-session. no-bash/readonly are spawn-time --exclude-tools
- * and stay untouched here (their approval config is inert 'off' anyway).
+ * Rewrite the approval config of a live session.
+ *
+ * - Legacy pi (bundled approval extension): the extension re-reads the file
+ *   (mtime-cached) on every tool call, so 'ask' ↔ 'off' flips apply
+ *   mid-session. no-bash/readonly are spawn-time --exclude-tools and stay
+ *   untouched here (their approval config is inert 'off' anyway).
+ * - DSCode: the runtime's NATIVE `/permissions <mode>` command is executed
+ *   locally by the agent session (registered via registerCommand — it runs
+ *   immediately, even while streaming, and never reaches the model). Sending
+ *   it flips the live permission variable on the spot; the command receipt
+ *   surfaces in the transcript like any other slash command. no-bash/readonly
+ *   change the tool SET, which no RPC command can do — those stay
+ *   new-session-only.
  */
 export function updateApprovalConfig(sessionId: string, mode: PermissionMode): boolean {
   const entry = sessions.get(sessionId)
   if (!entry) return false
+
+  if (detectCli().command === 'dscode') {
+    if (mode !== 'ask' && mode !== 'full' && mode !== 'plan' && mode !== 'auto') {
+      // Tool-set changes are spawn-time only; the picker flags them as such.
+      return true
+    }
+    return entry.sendPrompt(`/permissions ${mode}`)
+  }
+
   const { approval } = resolvePermissionMode(mode)
   writeApprovalConfig(sessionId, approval)
   return true

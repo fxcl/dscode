@@ -63,6 +63,14 @@ DSCODE_GUI_RUN_LIVE_TESTS=1 pnpm test:dscode:live   # opt-in live smoke (may con
 `DSCODE_HOME` with a temp HOME and stripped credentials — it never touches your
 real `~/.dscode`, auth or token quota.
 
+## Releasing
+
+CI lives in the repository root (`.github/workflows/`): push a `gui-v*` tag
+(e.g. `gui-v0.1.0`) to build the macOS artifacts and publish them to GitHub
+Releases — the feed electron-updater reads. Signing/notarization activates
+only when the `CSC_*` / `APPLE_*` secrets are configured; unsigned builds
+still publish (users right-click → Open on first launch).
+
 ## Runtime mapping (fork specifics)
 
 | OMP GUI | DSCode GUI |
@@ -70,18 +78,19 @@ real `~/.dscode`, auth or token quota.
 | `omp` / `pi` detection | `dscode` first (DSCODE_BIN → PATH → omp/pi fallback) |
 | `~/.pi/agent` / `~/.omp/agent` | `~/.dscode` (respects `DSCODE_HOME`) |
 | sessions under `--<cwd>--/` dirs | flat + `YYYY/MM/DD` partitions, filtered by header `cwd` |
-| `--tools` / `--approval-mode` (omp) | native `--permission ask/full` (ask mode's runtime dialogs arrive as extension_ui_request); no-bash/readonly use `--tools` ALLOWLISTS (fail-safe against future new tools) |
+| `--tools` / `--approval-mode` (omp) | native `--permission ask/auto/full/plan` (dialogs arrive as extension_ui_request); no-bash/readonly use `--tools` ALLOWLISTS (fail-safe against future new tools) |
 | `OMP_APPROVAL_CONFIG` | not used for dscode (native permission system; the bundled extension is legacy-pi-only) |
 | omp.sh installer | `npm install -g @thinkany/dscode` |
-| `pi install <pkg>` | `dscode packages install <pkg>` (remove via settings.json) |
+| `pi install <pkg>` | `dscode packages install <pkg>` / `packages remove <pkg>` |
 | RPC `login` probe (OAuth) | in-process `@thinkany/dscode-core` `authenticateProvider` with graphical prompts (`dscode login` requires a TTY the GUI cannot provide) |
 
 ### Settings → DSCode runtime
 
 Settings → DSCode CLI also exposes the runtime flags applied to every new
 session: **Tool harness** (`--harness minimal|safe`), **Sandbox**
-(`--sandbox read-only|workspace-write|danger-full-access`) and
-**server-side web search** (`--web`).
+(`--sandbox read-only|workspace-write|danger-full-access`), **server-side
+web search** (`--web`), **API transport** (`--transport responses|chat`) and
+**API base URL** (`--base-url`, DeepSeek-compatible endpoint override).
 
 ## Project structure
 
