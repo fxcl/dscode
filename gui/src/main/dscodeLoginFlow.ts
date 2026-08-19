@@ -43,6 +43,8 @@ interface PendingPrompt {
   reject: (error: Error) => void
   /** label → option id for select prompts (state carries labels, core wants ids). */
   selectIds?: Map<string, string>
+  /** Timeout handle so we can clear it when the prompt is answered/cancelled. */
+  timeout: ReturnType<typeof setTimeout>
 }
 
 export class DscodeLoginFlow {
@@ -52,6 +54,12 @@ export class DscodeLoginFlow {
   private pending: PendingPrompt | null = null
 
   constructor(private readonly onState: (state: LoginState) => void) {}
+
+  private clearPendingTimer(): void {
+    if (this.pending) {
+      clearTimeout(this.pending.timeout)
+    }
+  }
 
   get active(): boolean {
     return !this.finished
@@ -96,11 +104,30 @@ export class DscodeLoginFlow {
         return
       }
       const requestId = `dscode-login-${Date.now()}`
-      const selectIds =
-        prompt.type === 'select' && prompt.options
-          ? new Map(prompt.options.map((o) => [o.label, o.id]))
-          : undefined
-      this.pending = { requestId, resolve, reject, selectIds }
+      let selectIds: Map<string, string> | undefined
+      if (prompt.type === 'select' && prompt.options) {
+        selectIds = new Map()
+        for (const o of prompt.options) {
+          if (selectIds.has(o.label)) {
+            // Reject the prompt — authenticateProvider's catch block will
+            // report the failure. Do NOT call finish() here; that would
+            // set finished=true and prevent the catch from running.
+            reject(new Error(`Duplicate option label in login prompt: "${o.label}"`))
+            return
+          }
+          selectIds.set(o.label, o.id)
+        }
+      }
+      // Enforce the 10-minute user-response timeout — without this the Promise
+      // would hang forever if the user walks away and never answers/cancels.
+      const timeout = setTimeout(() => {
+        if (this.pending?.requestId === requestId) {
+          this.pending = null
+          reject(new Error('Login prompt timed out'))
+          this.finish({ status: 'failed', providerId: this.providerId, message: 'Login timed out waiting for user input.' })
+        }
+      }, PROMPT_TIMEOUT_MS)
+      this.pending = { requestId, resolve, reject, selectIds, timeout }
       if (prompt.type === 'select') {
         this.setState({
           status: 'waiting_for_select',
@@ -160,12 +187,14 @@ export class DscodeLoginFlow {
   answer(answer: LoginAnswer): boolean {
     if (this.finished || !this.pending) return false
     if ('cancelled' in answer) {
+      this.clearPendingTimer()
       this.pending.reject(new Error('Login cancelled'))
       this.pending = null
       this.cancel()
       return true
     }
     if ('value' in answer && typeof answer.value === 'string') {
+      this.clearPendingTimer()
       const { resolve, selectIds } = this.pending
       this.pending = null
       resolve(selectIds?.get(answer.value) ?? answer.value)
@@ -178,6 +207,7 @@ export class DscodeLoginFlow {
   cancel(): void {
     if (this.finished) return
     this.aborted = true
+    this.clearPendingTimer()
     this.pending?.reject(new Error('Login cancelled'))
     this.pending = null
     this.finish({ status: 'cancelled', providerId: this.providerId })
@@ -185,6 +215,7 @@ export class DscodeLoginFlow {
 
   private finish(state: LoginState): void {
     this.finished = true
+    this.clearPendingTimer()
     this.pending = null
     this.setState(state)
   }
