@@ -26,8 +26,9 @@ logs/
 # packaging artifacts
 *.tgz
 
-# vendored upstream reference checkout (not part of this repo)
+# vendored upstream reference checkouts (not part of this repo)
 feynman/
+omp-gui/
 
 # typeScript build info
 *.tsbuildinfo
