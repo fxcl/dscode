@@ -1,0 +1,156 @@
+name: GUI CI
+
+# Quality gate for the Electron GUI (gui/) — the monorepo sibling of omp-gui's
+# own CI. GitHub only reads workflows from the repository root, so this file
+# lives here and drives the gui/ workspace. Structure mirrors omp-gui CI:
+#   quality (blocking) · compat against repo-built binary (blocking) ·
+#   latest-release canary (non-blocking early warning).
+# gui-release.yml remains the tag-only packaging pipeline; this one guards
+# every regular push/PR that touches the GUI or its core dependency.
+
+on:
+  push:
+    branches:
+      - dev
+      - main
+    paths:
+      - 'gui/**'
+      - 'packages/core/**'
+      - 'src/**'
+      - 'scripts/**'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/gui-ci.yml'
+  pull_request:
+    branches:
+      - dev
+      - main
+    paths:
+      - 'gui/**'
+      - 'packages/core/**'
+      - 'src/**'
+      - 'scripts/**'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/gui-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gui-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Typecheck · Test · Build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Build the dscode CLI (core dependency of the GUI)
+        working-directory: .
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build:core
+          pnpm build
+
+      - name: Install GUI dependencies
+        working-directory: gui
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Typecheck
+        working-directory: gui
+        run: pnpm typecheck
+
+      - name: Unit tests
+        working-directory: gui
+        run: pnpm test
+
+      - name: Build the Electron app
+        working-directory: gui
+        run: pnpm build
+
+  # Real-binary compatibility suite: the GUI's own transport, handshake and
+  # session layers driven against the repo-built dscode binary. Stronger than
+  # omp-gui's npm-version pin — every run verifies the GUI against the exact
+  # core it ships with. Model-calling tests skip cleanly without credentials.
+  compat:
+    name: Repo-binary compatibility
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Build the dscode CLI (provides dist/cli.js for the suite)
+        working-directory: .
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build:core
+          pnpm build
+
+      - name: Install GUI dependencies
+        working-directory: gui
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Compatibility suite (repo-built binary)
+        working-directory: gui
+        run: pnpm test:dscode
+
+  # Latest-canary early warning, mirroring omp-gui's omp-latest-canary job:
+  # run the same suite against the newest published @thinkany/dscode. Failures
+  # do not block merges but surface upcoming breakage from the runtime side.
+  canary:
+    name: Latest dscode canary
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Build the dscode CLI (repo fallback for omp/pi probes)
+        working-directory: .
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build:core
+          pnpm build
+
+      - name: Install GUI dependencies
+        working-directory: gui
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Install latest published dscode
+        run: |
+          npm install -g @thinkany/dscode@latest
+          # Export the resolved path for the suite below — the global npm
+          # prefix depends on the runner's node install, so never hardcode it.
+          echo "DSCODE_BIN=$(command -v dscode)" >> "$GITHUB_ENV"
+          echo "dscode latest under test: $(dscode --version 2>&1 | head -n1)"
+
+      - name: Compatibility suite (published latest)
+        working-directory: gui
+        run: pnpm test:dscode
