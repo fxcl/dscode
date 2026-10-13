@@ -21,6 +21,7 @@
 | 11 | MCP 工具描述合成 lane（磁盘缓存） | `mcp-describe.ts` | 4 |
 | 12 | 持久化后台调度（cron/interval + 防注入唤醒 + 错过确认） | `cron-lite.ts` + `scheduler.ts` + `/schedule` | 5 |
 | 13 | Hook 信任清单（SHA-256）+ 执行审计日志 | `hook-trust.ts` + `hooks.ts` | 6 |
+| 14 | 学习代理多轮工具循环（read/write/edit 迭代 + 跨分类计数） | `taste.ts` 工具循环重写 | 7 |
 
 ## 关键设计对照
 
@@ -48,8 +49,9 @@
 - **压缩分级**：commandcode 三级（50/80/90 + 增量复用）；DSCode 采用
   "80% 预裁剪（无 LLM）+ 90% 框架全量摘要（lane 模型）"，增量复用由框架的
   `previousSummary` 透传承担。
-- **学习代理**：单轮 completion 返回完整 taste 文件（8KB 校验上限），未做
-  多工具循环——文件超限前无需引入代理循环。
+- **学习代理**：多轮工具循环（`read_taste_file`/`write_taste_file`/`edit_taste_file`，
+  路径二次校验、单文件 16KB 上限、无有效条目自动回退、跨分类条目计数），
+  对应 commandcode 的 `runTasteTool` + `createLearner` 循环（轮数按 DSCode 批次规模缩为 8）。
 
 ## 已知限制
 

@@ -1,13 +1,18 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { contentText, type Message, type Model, type Models } from "@earendil-works/pi-ai";
+import type { Message, Model, Models, Tool } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 
 /**
  * DSCode taste: durable, confidence-scored user preferences learned from
  * conversations, stored as markdown next to the project and injected into the
  * system prompt. Files live at <cwd>/.dscode/taste/ as either "taste.md" or
- * "<category>/taste.md" (one level of categories, nothing deeper).
+ * "{category}/taste.md" (one level of categories, nothing deeper).
+ *
+ * Learning runs as a small tool-loop agent (commandcode parity): the model
+ * iterates with read/write/edit tools over the taste directory instead of
+ * returning whole files, so large taste states are amended incrementally.
  */
 
 export const TASTE_DIR_NAME = path.join(".dscode", "taste");
@@ -17,6 +22,8 @@ export const TASTE_FILE = "taste.md";
 export const LEARNING_ENTRY_RE = /^- .*\bConfidence:\s*[0-9]+(?:\.[0-9]+)?\s*$/;
 
 export const MAX_TASTE_FILE_BYTES = 16_384;
+/** Tool-call turns the learning agent may spend per learning pass. */
+export const LEARNING_MAX_TURNS = 8;
 const MAX_LEARNED_HASHES = 2_000;
 const MIN_BATCH_CHARS = 40;
 const MAX_BATCH_MESSAGES = 16;
@@ -53,6 +60,24 @@ export function countLearnings(tasteContent: string): number {
   return tasteContent
     .split("\n")
     .filter((line) => LEARNING_ENTRY_RE.test(line)).length;
+}
+
+/** Sum learning bullets across every taste file in the directory. */
+export async function countAllLearnings(dir: string): Promise<number> {
+  let total = 0;
+  const walk = async (current: string, depth: number): Promise<void> => {
+    if (depth > 2) return;
+    for (const entry of await readdir(current).catch(() => [])) {
+      const full = path.join(current, entry);
+      if (entry.endsWith(".md")) {
+        total += countLearnings(await readFile(full, "utf8").catch(() => ""));
+      } else {
+        await walk(full, depth + 1);
+      }
+    }
+  };
+  await walk(dir, 0);
+  return total;
 }
 
 export function userHash(text: string): string {
@@ -126,39 +151,144 @@ function messageText(content: unknown): string {
 }
 
 /**
- * The taste-learning prompt. Contract: given the current taste file and NEW
- * user prompts, return either "no changes" or the complete updated taste file.
- * Every learning is a markdown bullet ending in "Confidence: <score>". Design
- * intent (original wording): durable and generalizable preferences only; never
- * re-record an existing preference; confidence may not move without fresh
- * evidence in the NEW prompts; prefer amending over near-duplicate files.
+ * The taste-learning agent prompt. The agent iterates with file tools over
+ * the taste directory; every learning is a markdown bullet ending in a
+ * confidence score. Design intent (original wording): durable and
+ * generalizable preferences only; learn only from the NEW prompts; never
+ * re-record; confidence may not move without fresh evidence; prefer amending
+ * existing files; when nothing durable is new, make no tool calls and reply
+ * "no changes".
  */
 export function learnerSystemPrompt(): string {
   return [
-    "You maintain the taste file for a coding agent: durable, generalizable",
+    "You maintain the taste files for a coding agent: durable, generalizable",
     "preferences the user has expressed — coding style, tooling choices,",
     "workflow habits, and communication preferences. One-off task details are",
     "never taste.",
     "",
-    "You will receive the current taste file and NEW user prompts from recent",
-    "sessions. Update the file so it captures every NEW durable preference",
-    "without losing or contradicting existing ones.",
+    "You will be given the current taste files and NEW user prompts from",
+    "recent sessions. Update the files so they capture every NEW durable",
+    "preference without losing or contradicting existing ones.",
     "",
     "Rules:",
     "- Learn only from the NEW prompts. They are the only evidence.",
     "- Do not re-record a preference that is already present. Seeing a similar",
-    "  old bullet is not new evidence.",
+    "  old bullet again is not new evidence.",
     "- Never raise or lower an existing bullet's Confidence unless a NEW prompt",
     "  is direct evidence for the change.",
     "- Each learning is one markdown bullet ending in a confidence score:",
     "  - Prefers tabs over spaces. Confidence: 0.9",
     "- Only record preferences that are explicit, repeated, or unambiguous.",
-    "- Keep the file small: merge near-duplicates instead of adding bullets.",
-    "- Keep the file under 8 KB.",
+    "- Prefer amending existing files over creating near-duplicates; merge",
+    "  near-duplicate bullets instead of adding them.",
+    "- Keep every file under 8 KB.",
     "",
-    'Reply with the complete updated file contents. If nothing durable is new,',
-    'reply with exactly: no changes',
+    "Use the tools to update the files. A taste path MUST be either",
+    '"taste.md" (the root file) or "{category}/taste.md" (one category level)',
+    "— never any other name or nesting:",
+    "- write_taste_file to create or replace a file.",
+    "- edit_taste_file to amend an existing file (first occurrence).",
+    "- read_taste_file to inspect a file before editing.",
+    "",
+    'When the NEW prompts reveal nothing durable, make no tool calls and reply',
+    'with exactly: no changes',
   ].join("\n");
+}
+
+/** Wire definitions for the three taste tools (typebox schemas). */
+export function tasteToolDefinitions(): Tool[] {
+  const pathProperty = Type.String({
+    description: 'Path relative to the taste directory: "taste.md" or "{category}/taste.md".',
+  });
+  return [
+    {
+      name: "read_taste_file",
+      description: "Read a taste file before editing it.",
+      parameters: Type.Object({ path: pathProperty }),
+    },
+    {
+      name: "write_taste_file",
+      description: "Create or replace a taste file with the given markdown content.",
+      parameters: Type.Object({
+        path: pathProperty,
+        content: Type.String({ description: "Full markdown content to write." }),
+      }),
+    },
+    {
+      name: "edit_taste_file",
+      description: "Replace the first occurrence of old_text with new_text in a taste file.",
+      parameters: Type.Object({
+        path: pathProperty,
+        old_text: Type.String({ description: "Exact existing text to replace." }),
+        new_text: Type.String({ description: "Replacement text." }),
+      }),
+    },
+  ];
+}
+
+interface ToolOutcome {
+  text: string;
+  isError: boolean;
+  /** True when the tool modified (or created) a taste file. */
+  mutated: boolean;
+}
+
+async function executeTasteTool(
+  dir: string,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<ToolOutcome> {
+  const readString = (key: string): string | undefined => {
+    const value = args[key];
+    return typeof value === "string" ? value : undefined;
+  };
+  const relative = readString("path");
+  if (!relative) return { text: "error: path is required", isError: true, mutated: false };
+  const validated = validateTasteRelativePath(relative);
+  if (!validated) {
+    return {
+      text: 'error: taste path must be "taste.md" or "{category}/taste.md"',
+      isError: true,
+      mutated: false,
+    };
+  }
+  const absolute = path.join(dir, validated);
+  if (name === "read_taste_file") {
+    try {
+      return { text: await readFile(absolute, "utf8"), isError: false, mutated: false };
+    } catch {
+      return { text: "(file does not exist)", isError: false, mutated: false };
+    }
+  }
+  if (name !== "write_taste_file" && name !== "edit_taste_file") {
+    return { text: `error: unknown tool ${name}`, isError: true, mutated: false };
+  }
+
+  const before = await readFile(absolute, "utf8").catch(() => undefined);
+  let next: string;
+  if (name === "write_taste_file") {
+    next = readString("content") ?? "";
+  } else {
+    if (before === undefined) {
+      return { text: "error: file does not exist", isError: true, mutated: false };
+    }
+    const oldText = readString("old_text");
+    const newText = readString("new_text");
+    if (oldText === undefined || newText === undefined || !before.includes(oldText)) {
+      return { text: "error: old_text not found", isError: true, mutated: false };
+    }
+    next = before.replace(oldText, newText);
+  }
+  if (Buffer.byteLength(next, "utf8") > MAX_TASTE_FILE_BYTES) {
+    return {
+      text: `error: taste file would exceed the ${MAX_TASTE_FILE_BYTES}-byte limit; merge near-duplicate bullets instead of adding more`,
+      isError: true,
+      mutated: false,
+    };
+  }
+  await mkdir(path.dirname(absolute), { recursive: true });
+  await writeFile(absolute, next.endsWith("\n") ? next : `${next}\n`, "utf8");
+  return { text: name === "write_taste_file" ? `wrote ${validated}` : `edited ${validated}`, isError: false, mutated: true };
 }
 
 export interface TasteLearningInput {
@@ -175,49 +305,96 @@ export interface TasteLearningOutcome {
   reason: "no-changes" | "learned" | "skipped-empty" | "rejected" | "disabled";
   entries: number;
   laneModelId?: string;
+  /** Tool turns spent by the learning agent. */
+  turns?: number;
 }
 
-/** Run one learning pass over the given prompts and persist the updated file. */
+/**
+ * Run one learning pass: the model iterates with taste tools over the taste
+ * directory (up to LEARNING_MAX_TURNS) and commits changes directly. If the
+ * final state has no valid learning bullets, the previous content is restored.
+ */
 export async function runTasteLearning(input: TasteLearningInput): Promise<TasteLearningOutcome> {
   const { models, model, cwd, prompts } = input;
-  const existing = (await readTasteFile(cwd)) ?? "";
+  const dir = tasteDirFor(cwd);
+  const before = (await readTasteFile(cwd)) ?? "";
   const digest = prompts.map((prompt, index) => `${index + 1}. ${oneLine(prompt, 400)}`).join("\n");
-  const userMessage: Message = {
-    role: "user",
-    content: [
-      "Current taste file:",
-      existing.trim() || "(empty — this is the first learning pass)",
-      "",
-      "NEW user prompts:",
-      digest,
-    ].join("\n"),
-    timestamp: Date.now(),
-  };
+  const messages: Message[] = [
+    {
+      role: "user",
+      content: [
+        "Current taste files:",
+        await existingSummary(dir),
+        "",
+        "NEW user prompts:",
+        digest,
+      ].join("\n"),
+      timestamp: Date.now(),
+    },
+  ];
+  const tools = tasteToolDefinitions();
 
-  const response = await models.complete(model, {
-    systemPrompt: learnerSystemPrompt(),
-    messages: [userMessage],
-  }, input.signal ? { signal: input.signal } : undefined);
-  const reply = extractReply(response.content).trim();
+  let mutated = false;
+  let turns = 0;
+  for (let turn = 0; turn < LEARNING_MAX_TURNS; turn += 1) {
+    input.signal?.throwIfAborted();
+    const assistant = await models.complete(
+      model,
+      { systemPrompt: learnerSystemPrompt(), messages, tools },
+      input.signal ? { signal: input.signal } : undefined,
+    );
+    messages.push(assistant);
+    turns += 1;
+    const toolCalls = assistant.content.filter(
+      (block): block is Extract<typeof block, { type: "toolCall" }> => block.type === "toolCall",
+    );
+    if (toolCalls.length === 0) break;
+    for (const call of toolCalls) {
+      const outcome = await executeTasteTool(dir, call.name, call.arguments ?? {});
+      if (outcome.mutated) mutated = true;
+      messages.push({
+        role: "toolResult",
+        toolCallId: call.id,
+        toolName: call.name,
+        content: [{ type: "text", text: outcome.text }],
+        isError: outcome.isError,
+        timestamp: Date.now(),
+      });
+    }
+  }
 
-  if (!reply || /^no changes\.?$/i.test(reply)) {
-    return { updated: false, reason: "no-changes", entries: countLearnings(existing) };
+  const entries = await countAllLearnings(dir);
+  if (mutated && entries === 0) {
+    // Invariant: a taste file always keeps at least one confidence-scored bullet.
+    if (before) await writeFile(tasteFileFor(cwd), before, "utf8");
+    else await rm(tasteFileFor(cwd)).catch(() => {});
+    return { updated: false, reason: "rejected", entries: 0, turns };
   }
-  const entries = countLearnings(reply);
-  if (entries === 0) {
-    return { updated: false, reason: "rejected", entries: countLearnings(existing) };
+  if (!mutated) {
+    return { updated: false, reason: "no-changes", entries: await countAllLearnings(dir), turns };
   }
-  if (Buffer.byteLength(reply, "utf8") > MAX_TASTE_FILE_BYTES) {
-    return { updated: false, reason: "rejected", entries: countLearnings(existing) };
-  }
-
-  await mkdir(tasteDirFor(cwd), { recursive: true });
-  await writeFile(tasteFileFor(cwd), `${reply.trimEnd()}\n`, "utf8");
-  return { updated: true, reason: "learned", entries };
+  return { updated: true, reason: "learned", entries, turns };
 }
 
-function extractReply(content: unknown): string {
-  return typeof content === "string" ? content : contentText(content as never);
+function existingSummary(dir: string): string {
+  // Built eagerly; the loop itself reads current content through the tools.
+  try {
+    const files: string[] = [];
+    const walk = (current: string, depth: number): void => {
+      if (depth > 2) return;
+      for (const entry of require("node:fs").readdirSync(current)) {
+        const full = path.join(current, entry);
+        if (entry.endsWith(".md")) files.push(path.relative(dir, full).replaceAll("\\", "/"));
+        else walk(full, depth + 1);
+      }
+    };
+    walk(dir, 0);
+    return files.length > 0
+      ? files.map((file) => `- ${file}`).join("\n")
+      : "(empty — this is the first learning pass)";
+  } catch {
+    return "(empty — this is the first learning pass)";
+  }
 }
 
 function oneLine(text: string, maxLength: number): string {
@@ -225,11 +402,6 @@ function oneLine(text: string, maxLength: number): string {
   return flat.length > maxLength ? `${flat.slice(0, maxLength)}…` : flat;
 }
 
-/**
- * Pick prompts that have not been learned yet (ledger-backed), run a learning
- * pass over them, and record their hashes on success — including "no changes",
- * so a prompt is never re-mined unless learning failed outright.
- */
 export async function learnFromNewMessages(
   deps: {
     models: Pick<Models, "complete">;

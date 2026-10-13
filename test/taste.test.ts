@@ -40,13 +40,27 @@ const GOOD_TASTE = [
   "- Runs pnpm, never npm. Confidence: 0.8",
 ].join("\n");
 
-function fakeModels(reply: string) {
+const textMessage = (text: string) => ({
+  role: "assistant",
+  content: [{ type: "text", text }],
+  stopReason: "end_turn",
+});
+
+const toolCallMessage = (id: string, name: string, args: Record<string, unknown>) => ({
+  role: "assistant",
+  content: [{ type: "toolCall", id, name, arguments: args }],
+  stopReason: "toolUse",
+});
+
+/** Scripted learning model: one step per turn; the last step repeats. */
+function fakeLoopModel(steps: Array<Record<string, unknown>>) {
+  let turn = 0;
   return {
-    complete: async () => ({
-      role: "assistant",
-      content: [{ type: "text", text: reply }],
-      stopReason: "end_turn",
-    }),
+    complete: async () => {
+      const step = steps[Math.min(turn, steps.length - 1)]!;
+      turn += 1;
+      return step;
+    },
   };
 }
 
@@ -61,11 +75,17 @@ describe("taste paths", () => {
   });
 });
 
-describe("taste learning", () => {
-  it("writes the updated file and counts entries", async () => {
+describe("taste learning tool loop", () => {
+  it("writes via write_taste_file and counts entries", async () => {
     const cwd = await tempProject();
     const outcome = await runTasteLearning({
-      models: fakeModels(`${GOOD_TASTE}\n- Uses 2-space indent in YAML. Confidence: 0.7`) as never,
+      models: fakeLoopModel([
+        toolCallMessage("t1", "write_taste_file", {
+          path: "taste.md",
+          content: `${GOOD_TASTE}\n- Uses 2-space YAML indent. Confidence: 0.7`,
+        }),
+        textMessage("done"),
+      ]) as never,
       model: { id: "deepseek-chat" } as never,
       cwd,
       prompts: ["Always use tabs, and run pnpm instead of npm."],
@@ -73,13 +93,61 @@ describe("taste learning", () => {
     expect(outcome.updated).toBe(true);
     expect(outcome.reason).toBe("learned");
     expect(outcome.entries).toBe(3);
+    expect(outcome.turns).toBe(2);
     expect(await readTasteFile(cwd)).toContain("Confidence: 0.9");
   });
 
-  it("treats a no-changes reply as a skip", async () => {
+  it("supports multi-turn read/write/edit iteration across category files", async () => {
     const cwd = await tempProject();
     const outcome = await runTasteLearning({
-      models: fakeModels("no changes") as never,
+      models: fakeLoopModel([
+        toolCallMessage("t1", "write_taste_file", { path: "taste.md", content: GOOD_TASTE }),
+        toolCallMessage("t2", "write_taste_file", {
+          path: "testing/taste.md",
+          content: "- Always writes table-driven tests. Confidence: 0.8",
+        }),
+        toolCallMessage("t3", "edit_taste_file", {
+          path: "taste.md",
+          old_text: "Confidence: 0.8",
+          new_text: "Confidence: 0.85",
+        }),
+        textMessage("done"),
+      ]) as never,
+      model: { id: "deepseek-chat" } as never,
+      cwd,
+      prompts: ["Use table-driven tests for everything."],
+    });
+    expect(outcome.reason).toBe("learned");
+    expect(outcome.entries).toBe(3);
+    const root = await readTasteFile(cwd);
+    expect(root).toContain("Confidence: 0.85");
+    const testing = await readFile(path.join(cwd, ".dscode", "taste", "testing", "taste.md"), "utf8");
+    expect(testing).toContain("table-driven");
+  });
+
+  it("returns errors to the model when a path escapes the taste directory", async () => {
+    const cwd = await tempProject();
+    const outcome = await runTasteLearning({
+      models: fakeLoopModel([
+        toolCallMessage("t1", "write_taste_file", { path: "../evil.md", content: "evil" }),
+        toolCallMessage("t2", "write_taste_file", { path: "taste.md", content: GOOD_TASTE }),
+        textMessage("done"),
+      ]) as never,
+      model: { id: "deepseek-chat" } as never,
+      cwd,
+      prompts: ["Use tabs."],
+    });
+    // The escaped write failed (nothing outside .dscode/taste), the retried
+    // root write landed.
+    expect(outcome.reason).toBe("learned");
+    expect(outcome.entries).toBe(2);
+    expect(await readFile(path.join(cwd, "evil.md"), "utf8").then(() => "exists").catch(() => "absent")).toBe("absent");
+  });
+
+  it("treats a no-tool-call reply as no changes", async () => {
+    const cwd = await tempProject();
+    const outcome = await runTasteLearning({
+      models: fakeLoopModel([textMessage("no changes")]) as never,
       model: { id: "deepseek-chat" } as never,
       cwd,
       prompts: ["Fix the bug in main.ts"],
@@ -88,20 +156,31 @@ describe("taste learning", () => {
     expect(await readTasteFile(cwd)).toBeUndefined();
   });
 
-  it("rejects responses without confidence-scored bullets", async () => {
+  it("reverts a session that ends without valid confidence bullets", async () => {
     const cwd = await tempProject();
     const outcome = await runTasteLearning({
-      models: fakeModels("- Likes dark mode") as never,
+      models: fakeLoopModel([
+        toolCallMessage("t1", "write_taste_file", { path: "taste.md", content: "- Likes dark mode" }),
+        textMessage("done"),
+      ]) as never,
       model: { id: "deepseek-chat" } as never,
       cwd,
       prompts: ["I like dark mode"],
     });
     expect(outcome).toMatchObject({ updated: false, reason: "rejected" });
+    expect(await readTasteFile(cwd)).toBeUndefined();
   });
 
   it("dedupes learned prompts through the ledger and honors the toggle", async () => {
     const cwd = await tempProject();
-    const models = fakeModels(`${GOOD_TASTE}\n- Commits with conventional prefixes. Confidence: 0.8`) as never;
+    const steps = [
+      toolCallMessage("t1", "write_taste_file", {
+        path: "taste.md",
+        content: `${GOOD_TASTE}\n- Commits with conventional prefixes. Confidence: 0.8`,
+      }),
+      textMessage("done"),
+    ];
+    const models = fakeLoopModel(steps) as never;
     const model = { id: "deepseek-chat" } as never;
     const messages = [
       { role: "user", content: "Please use conventional commit prefixes for all commits." },
@@ -136,8 +215,9 @@ describe("taste learning", () => {
     expect(texts).toEqual(["Real question about the build", "Second real prompt"]);
   });
 
-  it("builds a learner system prompt with the confidence contract", () => {
+  it("builds a learner system prompt with the tool-loop contract", () => {
     const prompt = learnerSystemPrompt();
+    expect(prompt).toContain("read_taste_file");
     expect(prompt).toContain("Confidence:");
     expect(prompt).toContain("no changes");
     expect(prompt).toContain("NEW user prompts");
@@ -190,7 +270,13 @@ describe("taste file persistence", () => {
   it("persists the ledger next to the taste file", async () => {
     const cwd = await tempProject();
     await learnFromNewMessages(
-      { models: fakeModels(GOOD_TASTE) as never, model: { id: "m" } as never },
+      {
+        models: fakeLoopModel([
+          toolCallMessage("t1", "write_taste_file", { path: "taste.md", content: GOOD_TASTE }),
+          textMessage("done"),
+        ]) as never,
+        model: { id: "m" } as never,
+      },
       cwd,
       [{ role: "user", content: "x".repeat(50) }],
     );
