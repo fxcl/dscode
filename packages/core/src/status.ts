@@ -29,6 +29,14 @@ export interface StatusReportDetails {
     contextWindow: number;
     percent: number | null;
   } | undefined;
+  breakdown?:
+    | {
+        conversationTokens: number;
+        tasteTokens: number;
+        /** Total minus locally-computable parts; undefined when total is unknown. */
+        systemAndToolsTokens?: number | undefined;
+      }
+    | undefined;
   entries: SessionEntry[];
   tools?: string[] | undefined;
   mcpServers?: number | undefined;
@@ -91,6 +99,16 @@ export function formatStatusReport(details: StatusReportDetails): string {
   }
   if (details.mcpServers !== undefined) {
     lines.push(`mcp        ${details.mcpServers} server${details.mcpServers === 1 ? "" : "s"}`);
+  }
+  if (details.breakdown) {
+    const parts = [
+      `conversation ${formatTokenCount(details.breakdown.conversationTokens)}`,
+      `taste ${formatTokenCount(details.breakdown.tasteTokens)}`,
+    ];
+    if (details.breakdown.systemAndToolsTokens !== undefined) {
+      parts.push(`system+tools ${formatTokenCount(details.breakdown.systemAndToolsTokens)}`);
+    }
+    lines.push(`layout     ${parts.join(" · ")}`);
   }
   if (details.serviceTier) {
     lines.push(`tier       ${details.serviceTier}`);

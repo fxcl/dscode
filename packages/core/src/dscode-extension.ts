@@ -1,4 +1,11 @@
-import type { AgentTool, AgentToolResult, ThinkingLevel } from "@earendil-works/pi-agent-core";
+import {
+  estimateContextTokens,
+  generateBranchSummary,
+  type AgentTool,
+  type AgentToolResult,
+  type ThinkingLevel,
+} from "@earendil-works/pi-agent-core";
+import { sessionEntryToContextMessages } from "@earendil-works/pi-coding-agent";
 import type {
   BashOperations,
   ExtensionAPI,
@@ -21,7 +28,30 @@ import {
 import { classifyCommand } from "./approval.js";
 import { brandBlue } from "./brand.js";
 import { capturePatchCheckpoint, restoreCheckpoint, type PatchCheckpoint } from "./checkpoint.js";
+import { compactPreparationWithLane } from "./compaction.js";
 import { permissionSchema, type PermissionMode } from "./config.js";
+import {
+  KEEP_RECENT_TOOL_RESULTS,
+  PRE_TRIM_AT,
+  PRE_TRIM_RESET_AT,
+  pruneOldToolResults,
+} from "./context-prune.js";
+import { scanAllCompetitorPrompts } from "./competitor-sessions.js";
+import { cronToHuman, parseCron } from "./cron-lite.js";
+import { estimateTextTokens, throttleToolResult } from "./guardrails.js";
+import { registerKnowledgeTool } from "./knowledge.js";
+import {
+  advanceAfterFire,
+  buildWakeupPrompt,
+  createScheduleJob,
+  humanSchedule,
+  loadSchedules,
+  registerScheduleTools,
+  saveSchedules,
+  schedulesFileFor,
+  splitDue,
+  type ScheduleJob,
+} from "./scheduler.js";
 import { optimizeDeepSeekResponsesPayload } from "./deepseek.js";
 import { registerDiagnosticsTool } from "./diagnostics.js";
 import { registerDiscoveryCommands } from "./discovery.js";
@@ -48,6 +78,7 @@ import { discoverProjectCommands } from "./project-profile.js";
 import { registerDSCodeProjectTrust } from "./project-trust.js";
 import { defaultModelForProvider } from "./providers.js";
 import type { DSCodeRuntimeOptions } from "./runtime-options.js";
+import { buildLaneModels, resolveLane } from "./lanes.js";
 import { executeSandboxedCommand, sandboxDescription } from "./sandbox.js";
 import { registerSessionCommands } from "./session-commands.js";
 import { registerServiceTierControls } from "./service-tier.js";
@@ -55,6 +86,17 @@ import { formatStatusReport } from "./status.js";
 import { normalizeDeepSeekBaseUrl, saveDeepSeekBaseUrl } from "./settings.js";
 import { registerSubagentTools } from "./subagents.js";
 import { isRecord } from "./type-guards.js";
+import {
+  clearTaste,
+  countLearnings,
+  isTasteEnabled,
+  learnFromNewMessages,
+  markLearned,
+  readTasteFile,
+  runTasteLearning,
+  setTasteEnabled,
+  tasteFileFor,
+} from "./taste.js";
 import {
   oneLine,
   renderCollapsibleToolResult,
@@ -145,6 +187,9 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
       let toolsBeforePlan: string[] | undefined;
       let projectCommands: string[] = [];
       let lastAgentFailed = false;
+      let lastErrorText: string | undefined;
+      let preTrimActive = false;
+      const tierTipsNotified = new Set<string>();
       let sessionPartition = Promise.resolve();
       let planState: PlanState | undefined;
       let lastOfferedPlanRevision = 0;
@@ -189,6 +234,8 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
       registerOutputsCommand(pi);
       registerAlphaTools(pi);
       registerHuggingFaceTools(pi);
+      registerKnowledgeTool(pi);
+      registerScheduleTools(pi, () => armSchedulerTimer());
       registerWebSearchCommand(pi);
       // Always register the web_search tool so the agent always sees it.
       // The execute handler re-reads config at call time and returns a clear
@@ -254,6 +301,36 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
         return optimizeDeepSeekResponsesPayload(event.payload, { webSearch: options.webSearch });
       });
 
+      // Background-lane compaction: summarize on a cheaper model when one is
+      // resolved, fall back to the session model, and on total failure return
+      // undefined so the framework's default compaction still runs.
+      pi.on("session_before_compact", async (event, ctx) => {
+        if (!ctx.model) return;
+        try {
+          const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
+          if (!auth.ok) return;
+          const { result, laneModelId, fellBack } = await compactPreparationWithLane(
+            event.preparation,
+            {
+              sessionModel: ctx.model,
+              apiKey: auth.apiKey,
+              headers: auth.headers,
+              signal: event.signal,
+              customInstructions: event.customInstructions,
+            },
+          );
+          if (fellBack) {
+            ctx.ui.notify(
+              `Compaction lane ${laneModelId} unavailable — summarized with ${ctx.model.id}. Set DSCODE_COMPACTION_MODEL to a valid model id.`,
+              "warning",
+            );
+          }
+          return { compaction: result };
+        } catch {
+          return undefined;
+        }
+      });
+
       pi.on("session_start", async (_event, ctx) => {
         checkpoints.length = 0;
         undone.clear();
@@ -285,6 +362,96 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
         toolsBeforePlan = undefined;
         applyPermissionTools();
         await queueSessionPartition(ctx);
+        // Load and arm background schedules. Due jobs at startup: missed
+        // one-shots ask the user first; recurring ones fire (deferred so the
+        // session finishes starting before a wakeup turn begins).
+        schedulesFile = schedulesFileFor(ctx.cwd);
+        schedulerCtx = ctx;
+        scheduleJobs = await loadSchedules(schedulesFile);
+        if (scheduleJobs.some((job) => job.nextRunAt <= Date.now())) {
+          setTimeout(() => {
+            void fireDueSchedules();
+          }, 100);
+        } else {
+          armSchedulerTimer();
+        }
+      });
+
+      // Pre-compaction prune tier: from 80% context usage, older tool results
+      // are projected down to one-line stubs for the request only — the stored
+      // transcript is untouched, so pruning evaporates after a compaction.
+      pi.on("context", async (event, ctx) => {
+        const usage = ctx.getContextUsage();
+        const ratio = usage ? (usage.tokens ?? 0) / usage.contextWindow : 0;
+        if (ratio >= PRE_TRIM_AT) {
+          preTrimActive = true;
+        } else if (ratio < PRE_TRIM_RESET_AT) {
+          preTrimActive = false;
+        } else {
+          return undefined;
+        }
+        if (!preTrimActive) return undefined;
+
+        if (!tierTipsNotified.has("prune")) {
+          tierTipsNotified.add("prune");
+          ctx.ui.notify(
+            `Context ${(ratio * 100).toFixed(0)}% — older tool outputs are pruned from requests (recent ${KEEP_RECENT_TOOL_RESULTS} kept).`,
+            "warning",
+          );
+        }
+        const pruned = pruneOldToolResults(event.messages);
+        return pruned === event.messages ? undefined : { messages: pruned };
+      });
+
+      // Background-lane taste learning: after each settled turn, distill new
+      // user prompts into durable preference bullets. Best-effort and isolated.
+      let learningInFlight = false;
+      pi.on("agent_settled", async (_event, ctx) => {
+        // Tiered context tips: nudge before the expensive full compaction, and
+        // once per threshold so the user can run /compact to control the summary.
+        const settledUsage = ctx.getContextUsage();
+        const settledRatio = settledUsage
+          ? (settledUsage.tokens ?? 0) / settledUsage.contextWindow
+          : 0;
+        if (settledRatio >= 0.9 && !tierTipsNotified.has("tier3")) {
+          tierTipsNotified.add("tier3");
+          ctx.ui.notify(
+            "Context 90% — full auto-compact imminent. Run /compact now to control what gets summarized.",
+            "warning",
+          );
+        } else if (settledRatio >= 0.8 && !tierTipsNotified.has("tier2")) {
+          tierTipsNotified.add("tier2");
+          ctx.ui.notify(
+            "Context 80% — auto-compact triggers at 90%. /compact now to free space before it kicks in.",
+            "info",
+          );
+        }
+
+        if (learningInFlight || !ctx.model || ctx.mode === "json" || ctx.mode === "print") return;
+        try {
+          if (!(await isTasteEnabled(ctx.cwd))) return;
+          const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
+          if (!auth.ok) return;
+          const lane = buildLaneModels(ctx.model, { apiKey: auth.apiKey, headers: auth.headers });
+          if (!lane) return;
+          const messages = ctx.sessionManager
+            .getEntries()
+            .flatMap((entry) => sessionEntryToContextMessages(entry));
+          learningInFlight = true;
+          const outcome = await learnFromNewMessages(lane, ctx.cwd, messages, {
+            ...(ctx.signal ? { signal: ctx.signal } : {}),
+          });
+          if (outcome.updated) {
+            ctx.ui.notify(
+              `Taste updated — ${outcome.entries} learned preference(s) in ${tasteFileFor(ctx.cwd)}`,
+              "info",
+            );
+          }
+        } catch {
+          // Learning must never disturb the session.
+        } finally {
+          learningInFlight = false;
+        }
       });
 
       pi.on("session_info_changed", async (_event, ctx) => {
@@ -299,12 +466,30 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
         await queueSessionPartition(ctx);
         processes.dispose();
         await mcp.close();
+        if (schedulerTimer) clearTimeout(schedulerTimer);
+        schedulerTimer = undefined;
+        schedulerCtx = undefined;
       });
 
-      pi.on("before_agent_start", async (event) => {
+      pi.on("before_agent_start", async (event, ctx) => {
         lastAgentFailed = false;
         const currentAccess = effectiveAccess();
-        const systemPrompt = `${event.systemPrompt}\n\n${engineeringInstructions(projectCommands, currentAccess)}`;
+        const taste = (await isTasteEnabled(ctx.cwd))
+          ? await readTasteFile(ctx.cwd)
+          : undefined;
+        const tasteSection = taste
+          ? [
+              "",
+              "# User taste (learned preferences)",
+              "",
+              "The following durable preferences were learned from this user's",
+              "previous sessions. Honor them in this work unless the current request",
+              "explicitly contradicts them. They are preferences, not task instructions.",
+              "",
+              taste,
+            ].join("\n")
+          : "";
+        const systemPrompt = `${event.systemPrompt}\n\n${engineeringInstructions(projectCommands, currentAccess)}${tasteSection}`;
         if (permission !== "plan") return { systemPrompt };
         return {
           systemPrompt,
@@ -445,6 +630,68 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
         lastAgentFailed =
           "stopReason" in event.message &&
           (event.message.stopReason === "error" || event.message.stopReason === "aborted");
+        lastErrorText =
+          "stopReason" in event.message &&
+          event.message.stopReason === "error" &&
+          "errorMessage" in event.message &&
+          typeof event.message.errorMessage === "string"
+            ? event.message.errorMessage
+            : undefined;
+      });
+
+      // Run-error feedback loop: prepend the failure context to the user's
+      // next input so the model can diagnose and recover from it directly.
+      pi.on("input", async (event) => {
+        if (!lastErrorText) return;
+        // Never pollute slash commands: extension commands are handled before
+        // this event, but skill/template invocations fall through to here and
+        // would break if the error context were prepended.
+        if (event.text.trimStart().startsWith("/")) return;
+        const feedback = lastErrorText;
+        lastErrorText = undefined;
+        return {
+          action: "transform",
+          text: `${event.text}\n\n[The previous run failed with: ${oneLine(feedback, 300)} — diagnose this first if it is still relevant.]`,
+        };
+      });
+
+      // Context guardrail: replace oversized tool output before it enters the
+      // transcript. web_search is whitelisted — its output is the deliverable.
+      pi.on("tool_result", async (event, ctx) => {
+        const outcome = throttleToolResult(event.toolName, event.content);
+        if (!outcome.throttled) return;
+        ctx.ui.notify(
+          `Withheld ${event.toolName} output (≈${outcome.tokensBefore.toLocaleString()} tokens) over the context guard.`,
+          "warning",
+        );
+        return { content: outcome.content };
+      });
+
+      // Branch-summary lane: when navigating away in the session tree,
+      // summarize the abandoned branch on the background lane model.
+      pi.on("session_before_tree", async (event, ctx) => {
+        if (!ctx.model || event.preparation.entriesToSummarize.length === 0) return;
+        try {
+          const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
+          if (!auth.ok) return;
+          const lane = buildLaneModels(ctx.model, { apiKey: auth.apiKey, headers: auth.headers });
+          if (!lane) return;
+          const result = await generateBranchSummary(
+            event.preparation.entriesToSummarize as never,
+            {
+              models: lane.models,
+              model: lane.model,
+              signal: event.signal,
+              ...(event.preparation.customInstructions
+                ? { customInstructions: event.preparation.customInstructions }
+                : {}),
+            },
+          );
+          if (!result.ok) return undefined;
+          return { summary: { summary: result.value.summary } };
+        } catch {
+          return undefined;
+        }
       });
 
       pi.on("agent_end", async (_event, ctx) => {
@@ -571,6 +818,222 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
           updateStatus(ctx);
           pi.appendEntry("dscode-permission", { permission });
           ctx.ui.notify(`Permission mode: ${permission}`, "info");
+        },
+      });
+
+      pi.registerCommand("taste", {
+        description: "Show or manage learned taste (import|on|off|clear)",
+        handler: async (args, ctx) => {
+          const action = args.trim();
+          if (!action) {
+            const enabled = await isTasteEnabled(ctx.cwd);
+            const taste = await readTasteFile(ctx.cwd);
+            const entries = countLearnings(taste ?? "");
+            ctx.ui.notify(
+              [
+                `taste: ${enabled ? "learning on" : "learning off"}`,
+                `file: ${tasteFileFor(ctx.cwd)} (${entries} entries)`,
+                `lane: ${ctx.model ? resolveLane("learning", ctx.model).laneModelId : "?"} (DSCODE_LEARNING_MODEL to override)`,
+                "import: learn from Claude Code / Codex sessions",
+                "on | off | clear",
+              ].join("\n"),
+              "info",
+            );
+            return;
+          }
+          if (action === "on" || action === "off") {
+            await setTasteEnabled(ctx.cwd, action === "on");
+            ctx.ui.notify(`Taste learning ${action === "on" ? "enabled" : "disabled"}.`, "info");
+            return;
+          }
+          if (action === "clear") {
+            await clearTaste(ctx.cwd);
+            ctx.ui.notify("Taste file and learned history cleared.", "info");
+            return;
+          }
+          if (action === "import") {
+            if (!ctx.model) {
+              ctx.ui.notify("No active model — cannot run taste learning.", "warning");
+              return;
+            }
+            ctx.ui.setWorkingVisible(false);
+            let sources;
+            try {
+              sources = await scanAllCompetitorPrompts(ctx.cwd, {});
+            } finally {
+              ctx.ui.setWorkingVisible(true);
+            }
+            if (sources.length === 0) {
+              ctx.ui.notify(
+                "No Claude Code or Codex sessions found for this project (scanned ~/.claude and ~/.codex).",
+                "info",
+              );
+              return;
+            }
+            const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
+            if (!auth.ok) {
+              ctx.ui.notify(`No usable credentials for ${ctx.model.provider}: ${auth.error}`, "warning");
+              return;
+            }
+            const lane = buildLaneModels(ctx.model, { apiKey: auth.apiKey, headers: auth.headers });
+            if (!lane) {
+              ctx.ui.notify(`Lane transport unsupported for ${ctx.model.api}.`, "warning");
+              return;
+            }
+            // Bound the import batch: 10 sessions × 30 prompts can be hundreds
+            // of messages; the learner digests the most recent 40 in one call.
+            const allPrompts = sources.flatMap((source) => source.prompts).slice(-40);
+            ctx.ui.setWorkingVisible(false);
+            let outcome;
+            try {
+              outcome = await runTasteLearning({
+                models: lane.models,
+                model: lane.model,
+                cwd: ctx.cwd,
+                prompts: allPrompts,
+                ...(ctx.signal ? { signal: ctx.signal } : {}),
+              });
+            } finally {
+              ctx.ui.setWorkingVisible(true);
+            }
+            if (outcome.reason === "learned" || outcome.reason === "no-changes") {
+              await markLearned(ctx.cwd, allPrompts);
+            }
+            const perSource = sources
+              .map((source) => `${source.agent}: ${source.prompts.length} prompts`)
+              .join(", ");
+            ctx.ui.notify(
+              outcome.reason === "learned"
+                ? `Imported ${perSource} — taste now has ${outcome.entries} entries.`
+                : outcome.reason === "no-changes"
+                  ? `Imported ${perSource} — nothing new to learn.`
+                  : `Import failed (${outcome.reason}); nothing written.`,
+              outcome.reason === "rejected" ? "warning" : "info",
+            );
+            return;
+          }
+          ctx.ui.notify("Usage: /taste [import|on|off|clear]", "warning");
+        },
+      });
+
+      // ── Background schedules (persistent per-project cron/interval tasks) ──
+      let schedulerTimer: ReturnType<typeof setTimeout> | undefined;
+      let scheduleJobs: ScheduleJob[] = [];
+      let schedulesFile = "";
+      let schedulerCtx: ExtensionContext | undefined;
+
+      const armSchedulerTimer = (): void => {
+        if (schedulerTimer) clearTimeout(schedulerTimer);
+        const next = scheduleJobs.length
+          ? Math.min(...scheduleJobs.map((job) => job.nextRunAt))
+          : Number.POSITIVE_INFINITY;
+        if (!Number.isFinite(next)) return;
+        // Clamp to setTimeout's 32-bit range; long waits simply re-arm later.
+        const delay = Math.max(0, Math.min(next - Date.now(), 2_147_000_000));
+        schedulerTimer = setTimeout(() => {
+          void fireDueSchedules();
+        }, delay);
+        schedulerTimer.unref?.();
+      };
+
+      const fireDueSchedules = async (): Promise<void> => {
+        if (!schedulerCtx || schedulerCtx.mode !== "tui") return;
+        const now = Date.now();
+        const { due, future } = splitDue(scheduleJobs, now);
+        if (due.length === 0) {
+          scheduleJobs = future;
+          await saveSchedules(schedulesFile, scheduleJobs).catch(() => {});
+          armSchedulerTimer();
+          return;
+        }
+        const remaining: ScheduleJob[] = [...future];
+        for (const job of due) {
+          const missedOneShot = job.oneShot && now - job.nextRunAt > 60_000;
+          const next = advanceAfterFire(job, now);
+          if (next) remaining.push(next);
+          if (missedOneShot && schedulerCtx.hasUI) {
+            let confirmed: boolean | undefined;
+            try {
+              schedulerCtx.ui.setWorkingVisible(false);
+              confirmed = await schedulerCtx.ui.confirm(
+                `Run missed scheduled task (${humanSchedule(job)})?`,
+                job.prompt.slice(0, 500),
+              );
+            } finally {
+              schedulerCtx.ui.setWorkingVisible(true);
+            }
+            if (!confirmed) continue;
+          }
+          await pi.sendUserMessage(buildWakeupPrompt({ ...job, nextRunAt: now }, missedOneShot), {
+            deliverAs: "followUp",
+          });
+        }
+        scheduleJobs = remaining;
+        await saveSchedules(schedulesFile, scheduleJobs).catch(() => {});
+        armSchedulerTimer();
+      };
+
+      pi.registerCommand("schedule", {
+        description: "List or manage background schedules (cancel <id>|clear)",
+        handler: async (args, ctx) => {
+          const action = args.trim();
+          const file = schedulesFileFor(ctx.cwd);
+          const jobs = await loadSchedules(file);
+          if (!action) {
+            ctx.ui.notify(
+              jobs.length === 0
+                ? "No background schedules. Create via schedule_create or /schedule every <minutes> <prompt>."
+                : jobs
+                    .map(
+                      (job) =>
+                        `${job.id} · ${humanSchedule(job)} · next ${new Date(job.nextRunAt).toLocaleString()}${job.oneShot ? " · one-shot" : ""}\n  ${job.prompt.slice(0, 120)}`,
+                    )
+                    .join("\n"),
+              "info",
+            );
+            return;
+          }
+          if (action === "clear") {
+            await saveSchedules(file, []);
+            armSchedulerTimer();
+            ctx.ui.notify("All background schedules cleared.", "info");
+            return;
+          }
+          if (action.startsWith("cancel ")) {
+            const id = action.slice("cancel ".length).trim();
+            const remaining = jobs.filter((job) => job.id !== id);
+            if (remaining.length === jobs.length) {
+              ctx.ui.notify(`No schedule with id ${id}.`, "warning");
+              return;
+            }
+            await saveSchedules(file, remaining);
+            armSchedulerTimer();
+            ctx.ui.notify(`Cancelled schedule ${id}.`, "info");
+            return;
+          }
+          const intervalMatch = /^every\s+(\d+)\s+(.+)$/s.exec(action);
+          if (intervalMatch) {
+            const minutes = Number.parseInt(intervalMatch[1]!, 10);
+            const prompt = intervalMatch[2]!.trim();
+            const created = createScheduleJob({
+              prompt,
+              everyMinutes: minutes,
+              now: Date.now(),
+              existing: jobs,
+            });
+            if ("error" in created) {
+              ctx.ui.notify(created.error, "warning");
+              return;
+            }
+            await saveSchedules(file, [...jobs, created.job]);
+            armSchedulerTimer();
+            ctx.ui.notify(
+              `Scheduled (id ${created.job.id}, ${humanSchedule(created.job)}); next run at ${new Date(created.job.nextRunAt).toLocaleString()}`,
+              "info",
+            );
+            return;
+          }
+          ctx.ui.notify("Usage: /schedule [every <minutes> <prompt> | cancel <id> | clear]", "warning");
         },
       });
 
@@ -743,6 +1206,26 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
                     percent: usage.percent,
                   }
                 : undefined,
+              breakdown: await (async () => {
+                const enabled = await isTasteEnabled(ctx.cwd);
+                const taste = enabled ? await readTasteFile(ctx.cwd) : undefined;
+                const tasteTokens = taste ? estimateTextTokens(taste) : 0;
+                const conversationTokens = estimateContextTokens(
+                  ctx.sessionManager.getEntries().flatMap((entry) => sessionEntryToContextMessages(entry)),
+                ).tokens;
+                return {
+                  conversationTokens,
+                  tasteTokens,
+                  ...(usage?.tokens != null
+                    ? {
+                        systemAndToolsTokens: Math.max(
+                          0,
+                          usage.tokens - conversationTokens - tasteTokens,
+                        ),
+                      }
+                    : {}),
+                };
+              })(),
               entries: ctx.sessionManager.getEntries(),
               tools: pi.getActiveTools(),
               mcpServers: mcp.serverCount(),
@@ -783,6 +1266,9 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
             [
               `model: ${ctx.model?.provider ?? "?"}/${ctx.model?.id ?? "?"}`,
               `transport: ${ctx.model?.api ?? options.transport}`,
+              `compaction lane: ${
+                ctx.model ? resolveLane("compaction", ctx.model).laneModelId : "?"
+              } (override with DSCODE_COMPACTION_MODEL, "off" to disable)`,
               `image input: ${ctx.model?.input.includes("image") ? "supported" : "not supported"}`,
               `thinking: ${ctx.thinkingLevel ?? pi.getThinkingLevel()}`,
               `service tier: ${tier ?? "not set"}`,

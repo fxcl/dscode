@@ -5,7 +5,13 @@ import {
   type Agent,
   type AgentMessage,
 } from "@earendil-works/pi-agent-core";
-import type { Model, Models, Usage } from "@earendil-works/pi-ai";
+import type { Model, Usage } from "@earendil-works/pi-ai";
+import {
+  generateSummaryWithUsage as generateSummaryWithUsageFramework,
+  type CompactionResult,
+  type SessionBeforeCompactEvent,
+} from "@earendil-works/pi-coding-agent";
+import { createLaneModel, resolveLane } from "./lanes.js";
 
 const AUTO_COMPACT_AT = 0.9;
 const KEEP_RECENT_TOKENS = 60_000;
@@ -19,9 +25,88 @@ export interface CompactResult {
   usage?: Usage;
 }
 
+export interface LaneCompactionOptions {
+  sessionModel: Model<any>;
+  apiKey?: string | undefined;
+  headers?: Record<string, string> | undefined;
+  signal?: AbortSignal | undefined;
+  customInstructions?: string | undefined;
+}
+
+export interface LaneCompactionOutcome {
+  result: CompactionResult;
+  laneModelId: string;
+  /** True when every lane attempt failed and the session model was used. */
+  fellBack: boolean;
+}
+
+/**
+ * Summarize the messages a compaction preparation selected, preferring the
+ * background lane model and falling back to the session model when the lane
+ * is unavailable (unknown id, provider rejection, network error).
+ *
+ * Iterative re-summarization is driven by the framework: when a previous
+ * summary exists, it arrives on the preparation and is passed through so the
+ * model updates it instead of re-reading full history.
+ */
+export async function compactPreparationWithLane(
+  preparation: SessionBeforeCompactEvent["preparation"],
+  options: LaneCompactionOptions,
+): Promise<LaneCompactionOutcome> {
+  const { sessionModel } = options;
+  const lane = resolveLane("compaction", sessionModel);
+  const laneModel = createLaneModel(sessionModel, lane.laneModelId);
+
+  const reserveTokens = preparation.settings.reserveTokens ?? SUMMARY_RESERVE_TOKENS;
+  const candidates: Array<{ model: Model<any>; label: string }> = [];
+  if (lane.active) candidates.push({ model: laneModel, label: lane.laneModelId });
+  candidates.push({ model: sessionModel, label: sessionModel.id });
+
+  let lastError: unknown;
+  for (const candidate of candidates) {
+    try {
+      const result = await generateSummaryWithUsageFramework(
+        preparation.messagesToSummarize,
+        candidate.model,
+        reserveTokens,
+        options.apiKey,
+        options.headers,
+        options.signal,
+        options.customInstructions,
+        preparation.previousSummary,
+        "low",
+      );
+      const text = result.text.trim();
+      if (!text) throw new Error("empty compaction summary");
+      const usedLane = candidate.label !== sessionModel.id;
+      return {
+        result: {
+          summary: text,
+          firstKeptEntryId: preparation.firstKeptEntryId,
+          tokensBefore: preparation.tokensBefore,
+          usage: result.usage,
+          details: { laneModelId: candidate.label, laneSource: lane.source },
+        },
+        laneModelId: candidate.label,
+        fellBack: lane.active && !usedLane,
+      };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("compaction summary failed on all lane candidates");
+}
+
+/**
+ * Standalone compaction for an in-memory agent. Kept for programmatic use;
+ * the interactive path goes through compactPreparationWithLane via the
+ * session_before_compact extension hook instead.
+ */
 export async function compactAgentContext(
   agent: Agent,
-  models: Models,
+  models: import("@earendil-works/pi-ai").Models,
   model: Model<any>,
   options: { force: boolean; signal?: AbortSignal },
 ): Promise<CompactResult> {
@@ -93,4 +178,3 @@ function findRetentionStart(messages: AgentMessage[], targetTokens: number): num
   }
   return candidate;
 }
-

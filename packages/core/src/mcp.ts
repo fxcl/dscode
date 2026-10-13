@@ -9,6 +9,8 @@ import { z } from "zod";
 import { renderCollapsibleToolResult, renderToolCall } from "./tool-ui.js";
 import { getDSCodeHome } from "./home.js";
 import { stripModelCredentialEnvironment } from "./providers.js";
+import { buildLaneModels } from "./lanes.js";
+import { synthesizeToolDescriptions, type SynthesisTarget } from "./mcp-describe.js";
 
 const stdioServerSchema = z.object({
   command: z.string().min(1),
@@ -108,15 +110,44 @@ export class MCPManager {
       }
 
       const listed = await client.listTools();
+      // Background-lane description synthesis: compress verbose third-party
+      // descriptions once per (server, tool, description), cached on disk.
+      let synthesizedDescriptions: Map<string, string> | undefined;
+      if (ctx.model) {
+        try {
+          const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
+          if (auth.ok) {
+            const lane = buildLaneModels(ctx.model, { apiKey: auth.apiKey, headers: auth.headers });
+            if (lane) {
+              const targets: SynthesisTarget[] = listed.tools.map((tool) => ({
+                name: tool.name,
+                description: tool.description ?? "",
+              }));
+              synthesizedDescriptions = await synthesizeToolDescriptions({
+                serverName,
+                tools: targets,
+                models: lane.models,
+                model: lane.model,
+                cachePath: path.join(getDSCodeHome(), "mcp-descriptions.json"),
+                ...(ctx.signal ? { signal: ctx.signal } : {}),
+              });
+            }
+          }
+        } catch {
+          synthesizedDescriptions = undefined;
+        }
+      }
       const registered: string[] = [];
       for (const tool of listed.tools) {
         const localName = `mcp__${sanitizeName(serverName)}__${sanitizeName(tool.name)}`;
         registered.push(localName);
+        const rawDescription = tool.description ?? `Call MCP tool ${tool.name} on ${serverName}`;
+        const description = synthesizedDescriptions?.get(tool.name) ?? rawDescription;
         pi.registerTool({
           name: localName,
           label: `${serverName}: ${tool.title ?? tool.name}`,
-          description: tool.description ?? `Call MCP tool ${tool.name} on ${serverName}`,
-          promptSnippet: `${localName}: ${tool.description ?? tool.name}`,
+          description,
+          promptSnippet: `${localName}: ${description}`,
           parameters: tool.inputSchema as any,
           renderShell: "self",
           executionMode: "parallel",
