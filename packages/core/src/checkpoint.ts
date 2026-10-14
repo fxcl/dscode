@@ -3,6 +3,10 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { Workspace } from "./workspace.js";
 
+/** Custom session entry types owned by the checkpoint/rewind system. */
+export const CHECKPOINT_ENTRY = "dscode-checkpoint";
+export const CHECKPOINT_UNDO_ENTRY = "dscode-checkpoint-undone";
+
 export interface FileSnapshot {
   path: string;
   content: string | null;

@@ -28,16 +28,24 @@ import {
 } from "./access.js";
 import { classifyCommand } from "./approval.js";
 import { brandBlue } from "./brand.js";
-import { capturePatchCheckpoint, restoreCheckpoint, type PatchCheckpoint } from "./checkpoint.js";
+import {
+  capturePatchCheckpoint,
+  CHECKPOINT_ENTRY,
+  CHECKPOINT_UNDO_ENTRY,
+  restoreCheckpoint,
+  type PatchCheckpoint,
+} from "./checkpoint.js";
 import { compactPreparationWithLane } from "./compaction.js";
 import { permissionSchema, type PermissionMode } from "./config.js";
 import {
   KEEP_RECENT_TOOL_RESULTS,
   pruneOldToolResults,
+  repairOrphanToolResults,
   resolvePruneTier,
   secondaryContextTips,
   type PruneTierState,
 } from "./context-prune.js";
+import { loadMemoryContext, extractMentionedPaths } from "./memory.js";
 import {
   formatBudgetStatus,
   loadBudgetConfig,
@@ -140,14 +148,19 @@ import {
   renderToolCall,
   type ToolPresentationContext,
 } from "./tool-ui.js";
+import {
+  abandonedMessageCount,
+  collectRewindPoints,
+  REWIND_ENTRY,
+  selectorWindow,
+  type RewindPoint,
+} from "./rewind.js";
 import { createCodingTools } from "./tools.js";
 import { formatThinkingLabel, registerCodingTui } from "./tui-experience.js";
 import { formatWebSearchStatus, getWebSearchStatus, resolveSearchMcpBinary, resolveWebSearchExecution, saveWebSearchConfig } from "./web-search.js";
 import { executeWebSearch, formatWebSearchResponse, type WebSearchExecOptions } from "./web-search-providers.js";
 import { Workspace } from "./workspace.js";
 
-const CHECKPOINT_ENTRY = "dscode-checkpoint";
-const CHECKPOINT_UNDO_ENTRY = "dscode-checkpoint-undone";
 const DIFF_ENTRY = "dscode-diff";
 
 const planAllowedTools = new Set([
@@ -473,8 +486,12 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
             "warning",
           );
         }
-        const pruned = pruneOldToolResults(event.messages, tier.keepRecent);
-        return pruned === event.messages ? undefined : { messages: pruned };
+        // Compose the per-request projections: prune, then orphan repair.
+        // Both return the input identity when they change nothing.
+        const projected = repairOrphanToolResults(
+          pruneOldToolResults(event.messages, tier.keepRecent),
+        );
+        return projected === event.messages ? undefined : { messages: projected };
       });
 
       // Background-lane taste learning: after each settled turn, distill new
@@ -602,6 +619,20 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
         planFollowUpSent = false;
         hookDecisions.stopContinuation = undefined;
         const currentAccess = effectiveAccess();
+        // Layered memory: user AGENTS.md, project AGENTS.md/CLAUDE.md, plus
+        // nested memory activated by @mentions in the conversation so far.
+        const mentionedPaths = extractMentionedPaths(
+          ctx.sessionManager.getBranch().flatMap((entry) => {
+            if (entry.type !== "message") return [];
+            if ((entry.message as { role?: unknown }).role !== "user") return [];
+            const content = (entry.message as { content?: unknown }).content;
+            return [typeof content === "string" ? content : ""];
+          }),
+        );
+        const memory = await loadMemoryContext({ cwd: ctx.cwd, mentionedPaths });
+        const memorySection = memory
+          ? ["", "# Memory files", "", "The following instructions come from AGENTS.md-style memory files.", "Honor them as standing project context.", "", memory].join("\n")
+          : "";
         const taste = (await isTasteEnabled(ctx.cwd))
           ? await readTasteFile(ctx.cwd)
           : undefined;
@@ -617,7 +648,7 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
               taste,
             ].join("\n")
           : "";
-        const systemPrompt = `${event.systemPrompt}\n\n${engineeringInstructions(projectCommands, currentAccess)}${tasteSection}`;
+        const systemPrompt = `${event.systemPrompt}\n\n${memorySection}${engineeringInstructions(projectCommands, currentAccess)}${tasteSection}`;
         if (permission !== "plan") return { systemPrompt };
         return {
           systemPrompt,
@@ -785,6 +816,16 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
             process.exitCode = 1;
           }
           return { action: "handled" };
+        }
+        // Rewind point: the branch leaf right before this turn. Framework-
+        // injected continuations (loop/hook) are not user checkpoints.
+        if (!event.text.startsWith("[goal loop") && !event.text.startsWith("[A project stop hook")) {
+          const branch = ctx.sessionManager.getBranch();
+          pi.appendEntry(REWIND_ENTRY, {
+            entryId: branch.at(-1)?.id ?? null,
+            prompt: oneLine(event.text, 120),
+            createdAt: Date.now(),
+          });
         }
         if (!lastErrorText) return;
         // Never pollute slash commands: extension commands are handled before
@@ -1515,6 +1556,96 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
           } catch (error) {
             ctx.ui.notify((error as Error).message, "error");
           }
+        },
+      });
+
+      pi.registerCommand("rewind", {
+        description: "Rewind to a checkpoint: conversation, files, or both",
+        handler: async (_args, ctx) => {
+          const entries = ctx.sessionManager.getBranch();
+          const points = collectRewindPoints(entries, (id) => undone.has(id));
+          if (points.length === 0) {
+            ctx.ui.notify("No rewind points yet — one is captured with every message you send.", "info");
+            return;
+          }
+          const visible = selectorWindow(points);
+          ctx.ui.setWorkingVisible(false);
+          let target: RewindPoint | undefined;
+          try {
+            const labels = visible.map((point, index) => `${index + 1}. ${point.prompt}`);
+            const picked = await ctx.ui.select("Rewind to which checkpoint?", labels);
+            if (picked !== undefined) target = visible[labels.indexOf(picked)];
+          } finally {
+            ctx.ui.setWorkingVisible(true);
+          }
+          if (!target) return;
+
+          const hasFiles = target.checkpoints.length > 0;
+          let mode: "both" | "conversation" | "files" = "conversation";
+          if (ctx.hasUI) {
+            const options = hasFiles
+              ? ["Conversation and code", "Conversation only", "Code only"]
+              : ["Conversation only"];
+            ctx.ui.setWorkingVisible(false);
+            let pickedMode: string | undefined;
+            try {
+              pickedMode = await ctx.ui.select(
+                `Rewind "${oneLine(target.prompt, 48)}" — restore what?`,
+                options,
+              );
+            } finally {
+              ctx.ui.setWorkingVisible(true);
+            }
+            if (!pickedMode) return;
+            mode =
+              pickedMode === "Conversation and code"
+                ? "both"
+                : pickedMode === "Code only"
+                  ? "files"
+                  : "conversation";
+          }
+
+          let filesRestored = 0;
+          if (mode !== "conversation") {
+            const workspace = new Workspace(ctx.cwd);
+            await workspace.initialize();
+            // Newest-first: applying each checkpoint's before-snapshot in
+            // reverse order converges on the state before this turn.
+            for (const checkpoint of [...target.checkpoints].reverse()) {
+              const paths = await restoreCheckpoint(workspace, checkpoint, true);
+              filesRestored += paths.length;
+              undone.add(checkpoint.id);
+              pi.appendEntry(CHECKPOINT_UNDO_ENTRY, {
+                checkpointId: checkpoint.id,
+                restoredAt: new Date().toISOString(),
+              });
+            }
+          }
+
+          let messagesRewound = 0;
+          if (mode !== "files") {
+            messagesRewound = abandonedMessageCount(entries, target.index);
+            const lastId = entries.at(-1)?.id;
+            if (target.entryId !== lastId) {
+              // Navigation via the command-context API (fires branch-summary
+              // hooks only when summarize is requested).
+              const fallbackTarget = target.entryId ?? entries.find((entry) => entry.type === "message")?.id;
+              if (fallbackTarget) {
+                await ctx.navigateTree(fallbackTarget, { summarize: false });
+              }
+            }
+          }
+
+          const parts = [
+            filesRestored > 0 ? `${filesRestored} file(s) restored` : "",
+            messagesRewound > 0 ? `${messagesRewound} message(s) rewound` : "",
+          ].filter(Boolean);
+          if (parts.length === 0) {
+            ctx.ui.notify("Already at this point — nothing to rewind.", "info");
+            return;
+          }
+          ctx.ui.notify(`Rewound: ${parts.join(", ")}.`, "info");
+          if (mode !== "files") ctx.ui.setEditorText(target.prompt);
         },
       });
 

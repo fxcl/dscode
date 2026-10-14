@@ -32,6 +32,9 @@
 | 22 | 从代码库学 taste（采样 + 证据约束蒸馏） | `taste.ts` `/taste learn [dir]` | 10 |
 | 23 | Cursor 会话导入（第三家源，编码变体探测） | `competitor-sessions.ts` | 10 |
 | 24 | 压缩次级提示（会话长度 / 图片权重，一次性） | `context-prune.ts` | 10 |
+| 25 | 记忆 @import 体系（用户层 + @import + @提及激活嵌套记忆） | `memory.ts` | 11 |
+| 26 | /rewind 三模式（回合 checkpoint + 对话/文件独立恢复） | `rewind.ts` + `/rewind` | 11 |
+| 27 | 孤儿 tool_use 修复（打断/回滚后合成工具结果） | `context-prune.ts` | 11 |
 
 ## 关键设计对照
 
@@ -88,6 +91,23 @@
 - **压缩次级提示**：上下文 ≥50%（轻档门槛）后各提醒一次——会话消息数
   超 50 建议开新会话；上下文图片 ≥3 张提示每张约 1.5k token、压缩前
   清理不再需要的截图。
+- **记忆 @import 体系**：`~/.dscode/AGENTS.md`（用户层）→ 项目根
+  AGENTS.md → CLAUDE.md → `.dscode/AGENTS.md`（首个存在者）→ **@提及激活
+  的嵌套层**（用户消息提到 cwd 内某文件时，从 cwd 到该目录逐层加载首个
+  存在的记忆文件——monorepo 子包上下文按需激活）。记忆文件内空白锚定的
+  `@路径` 递归内联引用文件（`~/` 展开到主目录、相对记忆文件所在目录解析、
+  围栏/行内代码豁免、深度上限 5、不可解析保持原样），每文件 32k 截断；
+  按路径去重，以 `# Memory from: <路径>` 块 + `---` 分隔注入 system prompt。
+- **/rewind 三模式**：每次真实用户输入（非注入 continuation、非预算拦截）
+  落一个回滚点（分支叶 entryId + 提示词），选择器展示最近 8 个；恢复时
+  按点**之后**的全部活跃 patch checkpoint（跳过已 undo）自新向旧还原文件
+  （force 跳过冲突检测，`content:null` 删除新建文件），对话恢复经框架
+  `navigateTree` 分支（不删历史、summarize 关闭）；三模式可选（对话+代码 /
+  仅对话 / 仅代码），完成后原提示词回填输入框。
+- **孤儿 tool_use 修复**：每请求投影——assistant 工具调用若无对应
+  toolResult（打断/回滚造成），在其后合成 `"No result — the tool call did
+  not complete (interrupted or lost)."` 结果，避免严格 provider 拒收
+  无结果调用；不动会话存储。
 
 ## 与 command-code 的有意差异
 
@@ -142,4 +162,5 @@
 `test/hook-trust.test.ts`、`test/hooks.test.ts`（更新：注入 home + 信任种子 + 审计断言）、
 `test/batch8.test.ts`（批次 8：双档裁剪/图片处理/预算/goal loop/stop 续跑，23 用例）、
 `test/batch9.test.ts`（批次 9：错误分类/备用选择/保险库，10 用例）、
-`test/batch10.test.ts`（批次 10：代码采样/学习回滚/Cursor 提取/次级提示，12 用例）。
+`test/batch10.test.ts`（批次 10：代码采样/学习回滚/Cursor 提取/次级提示，12 用例）、
+`test/batch11.test.ts`（批次 11：@import 展开/深度上限/分层加载/孤儿修复/回滚点选择，11 用例）。

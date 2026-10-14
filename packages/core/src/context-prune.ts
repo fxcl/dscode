@@ -112,8 +112,7 @@ export function pruneOldToolResults(
 }
 
 /** Messages above which a fresh-session nudge fires (secondary tip). */
-export const SECONDARY_TIP_MIN_MESSAGES = 50;
-/** Images in context above which the image-weight tip fires. */
+export const SECONDARY_TIP_MIN_MESSAGES = 50;/** Images in context above which the image-weight tip fires. */
 export const SECONDARY_TIP_MIN_IMAGES = 3;
 /** Documentation constant: approximate tokens one in-context image costs. */
 export const IMAGE_TOKEN_ESTIMATE = 1_500;
@@ -144,4 +143,66 @@ export function secondaryContextTips(
     });
   }
   return tips;
+}
+
+/** Synthetic result text for a tool call that never produced a result. */
+export const ORPHAN_TOOL_RESULT_TEXT =
+  "No result — the tool call did not complete (interrupted or lost).";
+
+interface ToolCallLike {
+  type?: unknown;
+  id?: unknown;
+  name?: unknown;
+}
+
+function assistantToolCalls(message: AgentMessage): Array<{ id: string; name: string }> {
+  const content = (message as { role?: unknown; content?: unknown }).content;
+  if ((message as { role?: unknown }).role !== "assistant" || !Array.isArray(content)) return [];
+  const calls: Array<{ id: string; name: string }> = [];
+  for (const block of content) {
+    if (
+      typeof block === "object" &&
+      block !== null &&
+      (block as ToolCallLike).type === "toolCall" &&
+      typeof (block as ToolCallLike).id === "string" &&
+      typeof (block as ToolCallLike).name === "string"
+    ) {
+      calls.push({ id: (block as ToolCallLike).id as string, name: (block as ToolCallLike).name as string });
+    }
+  }
+  return calls;
+}
+
+/**
+ * Send-time repair for orphaned tool calls: after an interrupt or a rewind,
+ * an assistant toolCall can persist without its toolResult, which makes the
+ * request payload invalid for strict providers. This per-request projection
+ * appends a synthetic "did not complete" result after each orphaned call.
+ * The stored transcript is never touched.
+ */
+export function repairOrphanToolResults(messages: readonly AgentMessage[]): AgentMessage[] {
+  const answered = new Set<string>();
+  for (const message of messages) {
+    if ((message as { role?: unknown }).role !== "toolResult") continue;
+    const id = (message as { toolCallId?: unknown }).toolCallId;
+    if (typeof id === "string") answered.add(id);
+  }
+
+  let changed = false;
+  const output: AgentMessage[] = [];
+  for (const message of messages) {
+    output.push(message);
+    for (const call of assistantToolCalls(message)) {
+      if (answered.has(call.id)) continue;
+      changed = true;
+      output.push({
+        role: "toolResult",
+        toolCallId: call.id,
+        toolName: call.name,
+        content: [{ type: "text", text: ORPHAN_TOOL_RESULT_TEXT }],
+        timestamp: Date.now(),
+      } as AgentMessage);
+    }
+  }
+  return changed ? output : (messages as AgentMessage[]);
 }
