@@ -112,7 +112,11 @@ import { registerDSCodeProjectTrust } from "./project-trust.js";
 import { defaultModelForProvider } from "./providers.js";
 import type { DSCodeRuntimeOptions } from "./runtime-options.js";
 import { buildLaneModels, resolveLane } from "./lanes.js";
-import { executeSandboxedCommand, sandboxDescription } from "./sandbox.js";
+import {
+  executeSandboxedCommand,
+  sandboxDescription,
+  sandboxUnavailableGuidance,
+} from "./sandbox.js";
 import { registerSessionCommands } from "./session-commands.js";
 import { registerServiceTierControls } from "./service-tier.js";
 import { formatStatusReport, summarizeSessionUsage } from "./status.js";
@@ -1818,6 +1822,13 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
                 mode: currentAccess.sandbox,
                 network: currentAccess.network,
               })}`,
+              ...(() => {
+                const guidance = sandboxUnavailableGuidance({
+                  mode: currentAccess.sandbox,
+                  network: currentAccess.network,
+                });
+                return guidance ? [`sandbox fix: ${guidance}`] : [];
+              })(),
               `session grants: ${access.describeGrants().join(", ") || "none"}`,
               `workspace trusted: ${ctx.isProjectTrusted() ? "yes" : "no"}`,
               `session: ${ctx.sessionManager.getSessionFile() ?? "memory only"}`,

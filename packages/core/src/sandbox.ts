@@ -7,8 +7,7 @@ import type { SandboxMode } from "./runtime-options.js";
 import { hostShellCommand } from "./shell.js";
 import {
   windowsNativeSandboxCommand,
-  windowsNativeSandboxDescription,
-  windowsNativeSandboxEnabled,
+  windowsNativeSandboxState,
 } from "./windows-sandbox.js";
 
 export interface SandboxOptions {
@@ -22,6 +21,103 @@ export interface SandboxedCommand {
   description: string;
 }
 
+/** Which backend can serve a given mode here, and why not if none can. */
+export type SandboxBackend =
+  | "host"
+  | "windows-native"
+  | "seatbelt"
+  | "docker"
+  | "unavailable";
+
+export interface SandboxResolution {
+  backend: SandboxBackend;
+  /** Human-readable status for /status, /doctor, and the status bar. */
+  description: string;
+  /** Why nothing can serve the mode (set only when backend is "unavailable"). */
+  reason?: string;
+}
+
+/**
+ * Adaptive backend selection: probe every backend this platform could offer
+ * and report the best one available, so /doctor can explain the situation
+ * before a command ever fails. Never silently weakens the requested mode.
+ */
+export function resolveSandboxBackend(options: SandboxOptions): SandboxResolution {
+  if (options.mode === "danger-full-access") {
+    return { backend: "host", description: "host access" };
+  }
+  const network = options.network ? " + network" : "";
+
+  if (process.platform === "win32") {
+    const state = windowsNativeSandboxState();
+    if (state.status === "ready") {
+      return { backend: "windows-native", description: `Windows native ${options.mode}${network}` };
+    }
+    return {
+      backend: "unavailable",
+      description: `Windows native sandbox ${state.status} (${options.mode})`,
+      reason: `No OS sandbox backend can serve ${options.mode} on win32. ${windowsUnavailableReason(state)}`,
+    };
+  }
+
+  if (process.platform === "darwin" && fs.existsSync("/usr/bin/sandbox-exec")) {
+    return { backend: "seatbelt", description: `Seatbelt ${options.mode}${network}` };
+  }
+  if (process.env.DSCODE_SANDBOX_IMAGE && commandExists("docker")) {
+    return {
+      backend: "docker",
+      description: `Docker ${process.env.DSCODE_SANDBOX_IMAGE} (${options.mode}${network})`,
+    };
+  }
+  return {
+    backend: "unavailable",
+    description: `unavailable (${options.mode})`,
+    reason: `No OS sandbox backend can serve ${options.mode} on ${process.platform}. ${otherPlatformUnavailableReason(options)}`,
+  };
+}
+
+function windowsUnavailableReason(state: ReturnType<typeof windowsNativeSandboxState>): string {
+  const hostFallback =
+    "For a trusted workspace, run with --sandbox danger-full-access (commands then run on the host with no isolation).";
+  if (state.status === "helper-missing") {
+    return (
+      "The Windows sandbox helper was not found in this build. Rebuild it with " +
+      `"pnpm build:windows-sandbox" (requires a Go toolchain), then run "dscode sandbox setup" from an elevated terminal. ` +
+      hostFallback
+    );
+  }
+  if (state.status === "not-set-up") {
+    return (
+      'The Windows native sandbox is enabled but not set up yet — run "dscode sandbox setup" from an elevated terminal. ' +
+      hostFallback
+    );
+  }
+  return (
+    'This build has a native Windows sandbox but it is off. Enable it with DSCODE_WINDOWS_SANDBOX=1, ' +
+    'then run "dscode sandbox setup" once from an elevated terminal. ' +
+    hostFallback
+  );
+}
+
+function otherPlatformUnavailableReason(options: SandboxOptions): string {
+  if (process.platform === "darwin") {
+    return (
+      "macOS Seatbelt (sandbox-exec) was not found. Set DSCODE_SANDBOX_IMAGE to a trusted Docker image, " +
+      "or run with --sandbox danger-full-access for a trusted workspace."
+    );
+  }
+  if (process.platform === "linux") {
+    return (
+      "No sandbox backend was found on this Linux host. Set DSCODE_SANDBOX_IMAGE to a trusted Docker image " +
+      `to sandbox ${options.mode}, or run with --sandbox danger-full-access for a trusted workspace.`
+    );
+  }
+  return (
+    `No OS sandbox backend supports ${options.mode} on this platform. ` +
+    "Use --sandbox danger-full-access only for a trusted workspace."
+  );
+}
+
 export function sandboxCommand(
   shellCommand: string,
   cwd: string,
@@ -31,7 +127,7 @@ export function sandboxCommand(
     return hostShellCommand(shellCommand);
   }
 
-  if (windowsNativeSandboxEnabled()) {
+  if (process.platform === "win32") {
     return windowsNativeSandboxCommand(shellCommand, cwd, options);
   }
 
@@ -63,8 +159,7 @@ export function sandboxCommand(
   }
 
   const image = process.env.DSCODE_SANDBOX_IMAGE;
-  if (image && commandExists("docker")) {
-    const networkArgs = options.network ? [] : ["--network", "none"];
+  if (image && commandExists("docker")) {    const networkArgs = options.network ? [] : ["--network", "none"];
     const userArgs =
       typeof process.getuid === "function" && typeof process.getgid === "function"
         ? ["--user", `${process.getuid()}:${process.getgid()}`]
@@ -103,22 +198,19 @@ export function sandboxCommand(
   }
 
   throw new Error(
-    `No OS sandbox backend is available for ${options.mode}. ` +
-      "Install macOS sandbox-exec, or set DSCODE_SANDBOX_IMAGE to a trusted Docker image. " +
-      "Use --sandbox danger-full-access only for a trusted workspace.",
+    `No OS sandbox backend is available for ${options.mode} on ${process.platform}. ` +
+      (resolveSandboxBackend(options).reason ??
+        "Use --sandbox danger-full-access only for a trusted workspace."),
   );
 }
 
 export function sandboxDescription(options: SandboxOptions): string {
-  if (options.mode === "danger-full-access") return "host access";
-  if (windowsNativeSandboxEnabled()) return windowsNativeSandboxDescription(options);
-  if (process.platform === "darwin" && fs.existsSync("/usr/bin/sandbox-exec")) {
-    return `Seatbelt ${options.mode}${options.network ? " + network" : ""}`;
-  }
-  if (process.env.DSCODE_SANDBOX_IMAGE && commandExists("docker")) {
-    return `Docker ${options.mode}${options.network ? " + network" : ""}`;
-  }
-  return `unavailable (${options.mode})`;
+  return resolveSandboxBackend(options).description;
+}
+
+/** Actionable explanation for /doctor when no backend can serve the mode. */
+export function sandboxUnavailableGuidance(options: SandboxOptions): string | undefined {
+  return resolveSandboxBackend(options).reason;
 }
 
 export function executeSandboxedCommand(

@@ -32,9 +32,40 @@ interface WindowsSandboxManifest {
 
 export type WindowsSandboxLifecycleCommand = "setup" | "status" | "uninstall";
 
+/** Why the native Windows sandbox cannot serve a command right now. */
+export type WindowsSandboxAvailability = "ready" | "not-enabled" | "helper-missing" | "not-set-up";
+
+export interface WindowsSandboxState {
+  status: WindowsSandboxAvailability;
+  /** Missing prerequisites reported by the helper (when it runs). */
+  missing?: string[];
+}
+
 export function windowsNativeSandboxEnabled(): boolean {
   const value = process.env[EXPERIMENTAL_ENV]?.trim().toLowerCase();
   return process.platform === "win32" && (value === "1" || value === "true");
+}
+
+/**
+ * Non-throwing availability probe. Separates the three Windows-only failure
+ * shapes so callers can give the right instruction: the user never opted in,
+ * the helper was not built, or the helper still needs its one-time setup.
+ */
+export function windowsNativeSandboxState(): WindowsSandboxState {
+  if (process.platform !== "win32" || !windowsNativeSandboxEnabled()) {
+    return { status: "not-enabled" };
+  }
+  let runtime: WindowsSandboxRuntime;
+  try {
+    runtime = configuredRuntime();
+  } catch (error) {
+    return { status: "helper-missing", missing: [(error as Error).message] };
+  }
+  const status = readStatus(runtime);
+  return {
+    status: status.ready ? "ready" : "not-set-up",
+    ...(status.missing?.length ? { missing: status.missing } : {}),
+  };
 }
 
 export function windowsNativeSandboxCommand(
@@ -115,13 +146,9 @@ function powerShellInvocation(command: string, shellCommand: string): ShellInvoc
 }
 
 export function windowsNativeSandboxDescription(options: SandboxOptions): string {
-  try {
-    const status = readStatus(configuredRuntime());
-    if (!status.ready) return `Windows native sandbox unavailable (${options.mode})`;
-    return `Windows native ${options.mode}${options.network ? " + network" : ""}`;
-  } catch {
-    return `Windows native sandbox unavailable (${options.mode})`;
-  }
+  const state = windowsNativeSandboxState();
+  if (state.status === "ready") return `Windows native ${options.mode}${options.network ? " + network" : ""}`;
+  return `Windows native sandbox ${state.status} (${options.mode})`;
 }
 
 function configuredRuntime(): WindowsSandboxRuntime {
