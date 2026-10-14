@@ -68,11 +68,22 @@ import { optimizeDeepSeekResponsesPayload } from "./deepseek.js";
 import { registerDiagnosticsTool } from "./diagnostics.js";
 import { registerDiscoveryCommands } from "./discovery.js";
 import { registerNaturalExit } from "./exit.js";
+import {
+  classifyQuotaError,
+  describeFallback,
+  isSameModel,
+  loadFallbackSelection,
+  parseFallbackSpec,
+  resolveFallbackModel,
+  saveFallbackSelection,
+  type FallbackSelection,
+} from "./fallback.js";
 import { registerHooks } from "./hooks.js";
 import { registerLocalImageInput } from "./image-input.js";
 import { partitionSessionFile } from "./home.js";
 import { ManagedProcessRegistry, type ManagedProcessResult } from "./managed-process.js";
 import { MCPManager } from "./mcp.js";
+import { loadVault, removeVaultEntry, setVaultEntry } from "./mcp-vault.js";
 import { getBundledPackagesDir } from "./package-ops.js";
 import { applyWorkspacePatch, type ApplyPatchResult } from "./patch.js";
 import {
@@ -227,6 +238,10 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
       let lastRecordedSessionCost = 0;
       // Stop-hook continuation decisions, written by the hooks module.
       const hookDecisions: { stopContinuation?: string | undefined } = {};
+      // Fallback chain: quota-type provider failures switch to the configured
+      // fallback model once and replay the input (one-way, so no loops).
+      let fallbackSelection: FallbackSelection | undefined;
+      let lastUserInput = "";
       const access = new SessionAccessController(options.sandbox, options.network);
       const effectiveAccess = (): EffectiveAccess => access.effective(permission);
 
@@ -384,6 +399,8 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
         budgetLedger = await loadBudgetLedger(monthKey());
         lastRecordedSessionCost = summarizeSessionUsage(ctx.sessionManager.getEntries()).cost;
         budgetExceeded = budgetCap !== undefined && budgetLedger.cost >= budgetCap;
+        fallbackSelection = loadFallbackSelection();
+        lastUserInput = "";
         updateStatus(ctx);
         ctx.ui.setHiddenThinkingLabel(
           formatThinkingLabel(ctx.model?.name ?? ctx.model?.id ?? options.modelId),
@@ -726,6 +743,7 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
       // /budget) are handled by the framework before this event, so the user
       // can always raise or disable the cap.
       pi.on("input", async (event, ctx) => {
+        lastUserInput = event.text;
         if (budgetExceeded) {
           if (ctx.hasUI) {
             ctx.ui.notify(
@@ -1182,6 +1200,103 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
         },
       });
 
+      // ── Cross-provider fallback chain (quota failures) ──
+      pi.registerCommand("fallback", {
+        description: "Show, set, or clear the quota-failure fallback model (<provider/model>|<model>|off)",
+        handler: async (args, ctx) => {
+          const value = args.trim();
+          if (!value) {
+            ctx.ui.notify(
+              fallbackSelection
+                ? [
+                    `fallback: ${describeFallback(fallbackSelection)} (active after quota-type failures)`,
+                    `resolved: ${
+                      resolveFallbackModel(fallbackSelection, ctx.modelRegistry)?.id ?? "no matching model in registry"
+                    }`,
+                    "set        /fallback <provider/model> or <model-id> (DSCODE_FALLBACK_MODEL when unset)",
+                  ].join("\n")
+                : "No fallback model. /fallback <provider/model> switches to it automatically when the provider rate-limits or the quota runs out. /fallback off clears.",
+              "info",
+            );
+            return;
+          }
+          if (value === "off") {
+            saveFallbackSelection(undefined);
+            fallbackSelection = undefined;
+            ctx.ui.notify("Fallback model cleared — quota failures are no longer auto-switched.", "info");
+            return;
+          }
+          const parsed = parseFallbackSpec(value);
+          if ("error" in parsed) {
+            ctx.ui.notify(`${parsed.error} — usage: /fallback <provider/model>`, "warning");
+            return;
+          }
+          saveFallbackSelection(parsed);
+          fallbackSelection = parsed;
+          const resolved = resolveFallbackModel(parsed, ctx.modelRegistry);
+          ctx.ui.notify(
+            resolved
+              ? `Fallback set to ${describeFallback(parsed)}${ctx.modelRegistry.hasConfiguredAuth(resolved) ? "" : " — note: no configured credentials yet (/login)"}.`
+              : `Fallback stored as ${describeFallback(parsed)}, but no model in the registry matches it yet (check provider id and model id).`,
+            resolved ? "info" : "warning",
+          );
+        },
+      });
+
+      // ── MCP credential vault (local-only secret storage) ──
+      pi.registerCommand("vault", {
+        description: "Manage MCP vault secrets (set <name> [value]|remove <name>)",
+        handler: async (args, ctx) => {
+          const action = args.trim();
+          if (!action) {
+            const vault = await loadVault();
+            const names = Object.keys(vault.entries);
+            ctx.ui.notify(
+              names.length === 0
+                ? "MCP vault is empty. /vault set <name> stores a secret; reference it in mcp.json as ${vault:<name>}."
+                : [
+                    `MCP vault (${names.length} entr${names.length === 1 ? "y" : "ies"}):`,
+                    ...names.map((name) => `  ${name}  ·  updated ${vault.entries[name]!.updatedAt}`),
+                    "Reference in mcp.json env/headers as ${vault:<name>}. Values never enter the model context.",
+                  ].join("\n"),
+              "info",
+            );
+            return;
+          }
+          const setMatch = /^set\s+([\w.-]+)(?:\s+([\s\S]+))?$/.exec(action);
+          if (setMatch) {
+            const name = setMatch[1]!;
+            let value = setMatch[2]?.trim();
+            if (!value) {
+              if (!ctx.hasUI) {
+                ctx.ui.notify("Usage: /vault set <name> <value> (interactive input needs a UI).", "warning");
+                return;
+              }
+              value = await ctx.ui.input(`Vault value for ${name}`, "paste the token or key");
+              if (!value || !value.trim()) return;
+              value = value.trim();
+            }
+            try {
+              await setVaultEntry(name, value);
+              ctx.ui.notify(`Vault entry ${name} stored (0600, never shown again).`, "info");
+            } catch (error) {
+              ctx.ui.notify((error as Error).message, "warning");
+            }
+            return;
+          }
+          const removeMatch = /^remove\s+([\w.-]+)$/.exec(action);
+          if (removeMatch) {
+            const removed = await removeVaultEntry(removeMatch[1]!);
+            ctx.ui.notify(
+              removed ? `Vault entry ${removeMatch[1]} removed.` : `No vault entry named ${removeMatch[1]}.`,
+              removed ? "info" : "warning",
+            );
+            return;
+          }
+          ctx.ui.notify("Usage: /vault [set <name> [value] | remove <name>]", "warning");
+        },
+      });
+
       // ── Goal loop: work toward one goal across consecutive turns ──
       pi.registerCommand("loop", {
         description: "Start, check, or stop a goal loop (<goal>|[max-turns] <goal>|stop|status)",
@@ -1490,6 +1605,8 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
               `session grants: ${access.describeGrants().join(", ") || "none"}`,
               `workspace trusted: ${ctx.isProjectTrusted() ? "yes" : "no"}`,
               `session: ${ctx.sessionManager.getSessionFile() ?? "memory only"}`,
+              `fallback: ${fallbackSelection ? `${describeFallback(fallbackSelection)} on quota failures` : "not configured"}`,
+              `mcp vault: ${Object.keys((await loadVault()).entries).length} secret(s)`,
               `tools: ${pi.getActiveTools().join(", ")}`,
               usage
                 ? `context: ${usage.tokens?.toLocaleString() ?? "?"}/${usage.contextWindow.toLocaleString()}`
@@ -1507,10 +1624,50 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
 
       registerHooks(pi, effectiveAccess, { decisions: hookDecisions });
 
-      // Turn arbiter, evaluated after every agent run. Priority: a stop-hook
-      // continuation request (one per turn, guarded in hooks.ts), then the
-      // goal loop. Both queue a follow-up turn instead of hijacking anything.
+      // Turn arbiter, evaluated after every agent run. Priority: a quota-type
+      // provider failure (one-way fallback switch + input replay), then a
+      // stop-hook continuation request (one per turn, guarded in hooks.ts),
+      // then the goal loop. Everything queues a follow-up turn instead of
+      // hijacking anything.
       pi.on("agent_end", async (event, ctx) => {
+        // Fallback chain: on a quota-type failure, switch to the configured
+        // fallback model and replay the input. The switch is one-way — once
+        // on the fallback, no further auto-switch can happen, so retry loops
+        // are structurally impossible.
+        const quotaKind = lastAgentFailed && lastErrorText ? classifyQuotaError(lastErrorText) : undefined;
+        if (quotaKind && fallbackSelection) {
+          const fallbackModel = resolveFallbackModel(fallbackSelection, ctx.modelRegistry);
+          const alreadyFallback = isSameModel(
+            ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined,
+            fallbackSelection,
+            fallbackModel,
+          );
+          if (
+            fallbackModel &&
+            !alreadyFallback &&
+            ctx.modelRegistry.hasConfiguredAuth(fallbackModel) &&
+            lastUserInput.trim()
+          ) {
+            const switched = await pi.setModel(fallbackModel);
+            if (switched) {
+              ctx.ui.notify(
+                `Provider ${quotaKind} on ${ctx.model?.id ?? "session model"} — switched to fallback ${describeFallback(fallbackSelection)} and replaying the input. /model to switch back.`,
+                "warning",
+              );
+              await pi.sendUserMessage(lastUserInput, { deliverAs: "followUp" });
+              return;
+            }
+            ctx.ui.notify(
+              `Fallback ${describeFallback(fallbackSelection)} could not be activated; staying on ${ctx.model?.id ?? "session model"}.`,
+              "warning",
+            );
+          } else if (fallbackModel && !alreadyFallback && !ctx.modelRegistry.hasConfiguredAuth(fallbackModel)) {
+            ctx.ui.notify(
+              `Fallback ${describeFallback(fallbackSelection)} has no configured credentials — log in first (/login). Not switching.`,
+              "warning",
+            );
+          }
+        }
         const stopReason = hookDecisions.stopContinuation;
         hookDecisions.stopContinuation = undefined;
         if (stopReason) {

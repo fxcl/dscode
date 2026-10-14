@@ -27,6 +27,8 @@
 | 17 | 月度预算上限（75%/90% 一次性预警 + 超限拦截） | `budget.ts` + `/budget` | 8 |
 | 18 | 压缩图片处理（摘要输入去图 + 内联附注） | `compaction.ts` | 8 |
 | 19 | 50% 轻裁剪档（三级化：50/80/90） | `context-prune.ts` 双档化 | 8 |
+| 20 | 跨 provider 配额降级链（错误分类 + 单向切换重放） | `fallback.ts` + `/fallback` | 9 |
+| 21 | MCP 凭据保险库（按名存取 + `${vault:}` 引用） | `mcp-vault.ts` + `/vault` | 9 |
 
 ## 关键设计对照
 
@@ -62,6 +64,16 @@
   保留区图片不受影响。
 - **双档预裁剪**：50%（保留最近 20 个工具结果）与 80%（保留 10）两级，
   各带滞回（45%/70% 解除），深档优先；仍为每请求投影，不触碰会话存储。
+- **配额降级链**：回合失败且错误分类为配额类（429/限流、配额耗尽、
+  用量/花费上限、余额不足）时，自动切到配置的备用模型（`/fallback
+  <provider/model>` 或 `<model-id>`，存 settings.json，`DSCODE_FALLBACK_MODEL`
+  兜底）并重放该次输入。切换是**单向**的（不自动切回），结构上杜绝
+  两个模型之间的重试风暴；备用模型无凭证或切换失败只提示不阻塞。
+  仲裁优先级：降级重放 > stop 续跑 > goal loop。
+- **MCP 保险库**：密钥按名存 `~/.dscode/mcp-vault.json`（0600 原子写），
+  MCP 配置的 env/headers 用 `${vault:NAME}` 引用；引用缺失时该 server
+  连接失败并给出可用条目列表（快速失败，不传未解析字面量）。仅本地
+  命令管理（`/vault set|remove`），密钥值不进入模型上下文。
 
 ## 与 command-code 的有意差异
 
@@ -101,9 +113,11 @@
 新增：`lanes.ts`、`compaction.ts`（重写）、`taste.ts`、`competitor-sessions.ts`、
 `guardrails.ts`、`context-prune.ts`、`knowledge.ts`、`mcp-describe.ts`、
 `cron-lite.ts`、`scheduler.ts`、`hook-trust.ts`、`status.ts`（扩展）、
-`budget.ts`、`goal-loop.ts`（批次 8）。
-修改：`dscode-extension.ts`（全部接线）、`mcp.ts`（描述合成）、`hooks.ts`（信任+审计+Stop 续跑）、
-`status.ts`（预算行）、`context-prune.ts`（双档化）、`compaction.ts`（图片处理）。
+`budget.ts`、`goal-loop.ts`（批次 8）、`fallback.ts`、`mcp-vault.ts`（批次 9）。
+修改：`dscode-extension.ts`（全部接线）、`mcp.ts`（描述合成 + 保险库引用）、
+`hooks.ts`（信任+审计+Stop 续跑）、`status.ts`（预算行）、`context-prune.ts`（双档化）、
+`compaction.ts`（图片处理）。
 测试：`test/taste.test.ts`、`test/guardrails.test.ts`、`test/batch4.test.ts`、`test/scheduler.test.ts`、
 `test/hook-trust.test.ts`、`test/hooks.test.ts`（更新：注入 home + 信任种子 + 审计断言）、
-`test/batch8.test.ts`（批次 8：双档裁剪/图片处理/预算/goal loop/stop 续跑，23 用例）。
+`test/batch8.test.ts`（批次 8：双档裁剪/图片处理/预算/goal loop/stop 续跑，23 用例）、
+`test/batch9.test.ts`（批次 9：错误分类/备用选择/保险库，10 用例）。

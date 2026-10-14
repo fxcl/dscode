@@ -8,6 +8,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { z } from "zod";
 import { renderCollapsibleToolResult, renderToolCall } from "./tool-ui.js";
 import { getDSCodeHome } from "./home.js";
+import { loadVault, resolveVaultReferences, type VaultFile } from "./mcp-vault.js";
 import { stripModelCredentialEnvironment } from "./providers.js";
 import { buildLaneModels } from "./lanes.js";
 import { synthesizeToolDescriptions, type SynthesisTarget } from "./mcp-describe.js";
@@ -47,10 +48,12 @@ export class MCPManager {
       this.errors.push("Project is not trusted; project MCP servers were not started.");
     }
     const configs = await loadMcpConfigs(ctx.cwd, trusted);
+    // Vault secrets (${vault:NAME} references) are loaded once per connect.
+    const vault = await loadVault();
     for (const [serverName, config] of Object.entries(configs)) {
       if (config.disabled) continue;
       try {
-        await this.connectServer(pi, ctx, serverName, config);
+        await this.connectServer(pi, ctx, serverName, config, vault);
       } catch (error) {
         this.errors.push(`${serverName}: ${(error as Error).message}`);
       }
@@ -83,14 +86,31 @@ export class MCPManager {
     ctx: ExtensionContext,
     serverName: string,
     config: MCPServerConfig,
+    vault: VaultFile,
   ): Promise<void> {
+    const expandWithVault = (values: Record<string, string>): Record<string, string> => {
+      const output: Record<string, string> = {};
+      for (const [key, value] of Object.entries(values)) {
+        const resolved = resolveVaultReferences(value, vault.entries);
+        if (resolved.missing.length > 0) {
+          const available = Object.keys(vault.entries);
+          throw new Error(
+            `unknown vault reference ${resolved.missing.map((name) => `\${vault:${name}}`).join(", ")}${
+              available.length ? ` (vault entries: ${available.join(", ")})` : " (vault is empty)"
+            }`,
+          );
+        }
+        output[key] = resolved.value;
+      }
+      return output;
+    };
     const client = new Client({ name: "dscode", version: DSCODE_VERSION });
     let close: (() => Promise<void>) | undefined;
     try {
       if ("command" in config) {
         const environment = {
           ...defaultStringEnvironment(),
-          ...expandEnvironment(config.env ?? {}),
+          ...expandEnvironment(expandWithVault(config.env ?? {})),
         };
         const transport = new StdioClientTransport({
           command: config.command,
@@ -103,7 +123,7 @@ export class MCPManager {
         close = async () => transport.close();
       } else {
         const transport = new StreamableHTTPClientTransport(new URL(config.url), {
-          requestInit: { headers: expandEnvironment(config.headers ?? {}) },
+          requestInit: { headers: expandEnvironment(expandWithVault(config.headers ?? {})) },
         });
         await client.connect(transport as any);
         close = async () => transport.close();
