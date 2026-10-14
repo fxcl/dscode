@@ -47,6 +47,7 @@
     "dev": "tsx --env-file=.env src/cli.ts --network",
     "start": "node dist/cli.js",
     "test": "vitest run",
+    "verify:ports": "node scripts/verify-ports.mjs",
     "package:check": "node scripts/package-smoke.mjs",
     "typecheck": "pnpm build:core && tsc -p tsconfig.json --noEmit",
     "check": "pnpm typecheck && pnpm test && pnpm build && pnpm package:check",

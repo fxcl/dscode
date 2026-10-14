@@ -122,6 +122,13 @@
 全量回归失败集与移植前基线一致（DSCode 原有的 Windows 环境用例，经 git stash 对照确认；
 批次 8 复验：同一失败集在含/不含本批改动的两次运行中一致，基线侧多 1 例抖动）。
 
+**端到端验证**：`pnpm verify:ports`（`scripts/verify-ports.mjs`）在临时 `DSCODE_HOME`
++ 本地 mock OpenAI 服务器上做 4 个隔离场景的自动化断言——预算硬拦截
+（超额账本 → 请求前拦截、退出码 1、零 provider 请求）、hook 信任全流程
+（首见 untrusted-blocked 审计 → 种子信任后 success 审计）、预算记账与
+75% 一次性预警（真实回合用量入账）、429 配额错误路径（框架有界重试后
+失败、无降级重放风暴）。
+
 ## 涉及文件
 
 新增：`lanes.ts`、`compaction.ts`（重写）、`taste.ts`、`competitor-sessions.ts`、

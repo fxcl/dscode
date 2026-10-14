@@ -1315,9 +1315,13 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
           saveFallbackSelection(parsed);
           fallbackSelection = parsed;
           const resolved = resolveFallbackModel(parsed, ctx.modelRegistry);
+          const sameProviderHint =
+            resolved && ctx.model && resolved.provider === ctx.model.provider
+              ? " Note: same provider as the current session — if the provider itself is rate-limiting, pick a fallback on a different provider."
+              : "";
           ctx.ui.notify(
             resolved
-              ? `Fallback set to ${describeFallback(parsed)}${ctx.modelRegistry.hasConfiguredAuth(resolved) ? "" : " — note: no configured credentials yet (/login)"}.`
+              ? `Fallback set to ${describeFallback(parsed)}${ctx.modelRegistry.hasConfiguredAuth(resolved) ? "" : " — note: no configured credentials yet (/login)"}.${sameProviderHint}`
               : `Fallback stored as ${describeFallback(parsed)}, but no model in the registry matches it yet (check provider id and model id).`,
             resolved ? "info" : "warning",
           );
