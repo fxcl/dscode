@@ -309,28 +309,27 @@ export interface TasteLearningOutcome {
   turns?: number;
 }
 
+interface TasteToolLoopInput {
+  models: Pick<Models, "complete">;
+  model: Model<any>;
+  cwd: string;
+  systemPrompt: string;
+  userContent: string;
+  signal?: AbortSignal | undefined;
+}
+
 /**
- * Run one learning pass: the model iterates with taste tools over the taste
- * directory (up to LEARNING_MAX_TURNS) and commits changes directly. If the
- * final state has no valid learning bullets, the previous content is restored.
+ * Shared taste tool-loop: the model iterates with the taste file tools over
+ * the taste directory (up to LEARNING_MAX_TURNS) and commits changes directly.
+ * If the final state has no valid learning bullets, the previous content is
+ * restored.
  */
-export async function runTasteLearning(input: TasteLearningInput): Promise<TasteLearningOutcome> {
-  const { models, model, cwd, prompts } = input;
+async function runTasteToolLoop(input: TasteToolLoopInput): Promise<TasteLearningOutcome> {
+  const { models, model, cwd } = input;
   const dir = tasteDirFor(cwd);
   const before = (await readTasteFile(cwd)) ?? "";
-  const digest = prompts.map((prompt, index) => `${index + 1}. ${oneLine(prompt, 400)}`).join("\n");
   const messages: Message[] = [
-    {
-      role: "user",
-      content: [
-        "Current taste files:",
-        await existingSummary(dir),
-        "",
-        "NEW user prompts:",
-        digest,
-      ].join("\n"),
-      timestamp: Date.now(),
-    },
+    { role: "user", content: input.userContent, timestamp: Date.now() },
   ];
   const tools = tasteToolDefinitions();
 
@@ -340,7 +339,7 @@ export async function runTasteLearning(input: TasteLearningInput): Promise<Taste
     input.signal?.throwIfAborted();
     const assistant = await models.complete(
       model,
-      { systemPrompt: learnerSystemPrompt(), messages, tools },
+      { systemPrompt: input.systemPrompt, messages, tools },
       input.signal ? { signal: input.signal } : undefined,
     );
     messages.push(assistant);
@@ -374,6 +373,28 @@ export async function runTasteLearning(input: TasteLearningInput): Promise<Taste
     return { updated: false, reason: "no-changes", entries: await countAllLearnings(dir), turns };
   }
   return { updated: true, reason: "learned", entries, turns };
+}
+
+/**
+ * Run one learning pass from conversation prompts.
+ */
+export async function runTasteLearning(input: TasteLearningInput): Promise<TasteLearningOutcome> {
+  const { cwd, prompts } = input;
+  const digest = prompts.map((prompt, index) => `${index + 1}. ${oneLine(prompt, 400)}`).join("\n");
+  return runTasteToolLoop({
+    models: input.models,
+    model: input.model,
+    cwd,
+    systemPrompt: learnerSystemPrompt(),
+    userContent: [
+      "Current taste files:",
+      await existingSummary(tasteDirFor(cwd)),
+      "",
+      "NEW user prompts:",
+      digest,
+    ].join("\n"),
+    signal: input.signal,
+  });
 }
 
 function existingSummary(dir: string): string {
@@ -471,4 +492,154 @@ export async function markLearned(cwd: string, prompts: readonly string[]): Prom
   const ledger = await loadLedger(cwd);
   ledger.hashes.push(...prompts.map(userHash));
   await saveLedger(cwd, ledger);
+}
+
+// ---------------------------------------------------------------------------
+// Learning taste from an existing codebase
+// ---------------------------------------------------------------------------
+
+const CODE_EXTENSIONS = new Set([
+  ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".go", ".rs", ".java",
+  ".kt", ".swift", ".c", ".h", ".cpp", ".hpp", ".cs", ".rb", ".php", ".sh",
+  ".ps1", ".sql", ".scala", ".lua",
+]);
+const SKIPPED_DIRS = new Set([
+  "node_modules", "dist", "build", "out", "target", "vendor", "coverage",
+  "__pycache__", ".next", ".nuxt", ".venv", "venv", "deps", "_build",
+]);
+const MAX_SAMPLE_FILES = 60;
+const MAX_SAMPLE_FILE_BYTES = 8_192;
+const MAX_SAMPLE_TOTAL_CHARS = 96_000;
+
+export interface CodeSample {
+  relativePath: string;
+  content: string;
+  truncated: boolean;
+}
+
+/**
+ * Deterministic, size-capped source sample from a repository: code extensions
+ * only, dependency/build directories and hidden dirs skipped, per-file and
+ * total budgets enforced. Sorted by path so the sample is stable.
+ */
+export async function collectCodeSamples(root: string): Promise<CodeSample[]> {
+  const samples: CodeSample[] = [];
+  let totalChars = 0;
+  const walk = async (dir: string, depth: number): Promise<void> => {
+    if (depth > 8 || samples.length >= MAX_SAMPLE_FILES || totalChars >= MAX_SAMPLE_TOTAL_CHARS) return;
+    const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (samples.length >= MAX_SAMPLE_FILES || totalChars >= MAX_SAMPLE_TOTAL_CHARS) return;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name.startsWith(".") || SKIPPED_DIRS.has(entry.name)) continue;
+        await walk(full, depth + 1);
+        continue;
+      }
+      if (!entry.isFile() || !CODE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
+      const stat = await import("node:fs/promises").then((fs) => fs.stat(full)).catch(() => undefined);
+      if (!stat || stat.size > MAX_SAMPLE_FILE_BYTES * 4) continue;
+      let content = await readFile(full, "utf8").catch(() => undefined);
+      if (content === undefined || content.includes("\0")) continue;
+      const relativePath = path.relative(root, full).replaceAll("\\", "/");
+      let truncated = false;
+      if (content.length > MAX_SAMPLE_FILE_BYTES) {
+        content = content.slice(0, MAX_SAMPLE_FILE_BYTES);
+        truncated = true;
+      }
+      const budgetLeft = MAX_SAMPLE_TOTAL_CHARS - totalChars;
+      if (content.length > budgetLeft) {
+        content = content.slice(0, budgetLeft);
+        truncated = true;
+      }
+      totalChars += content.length;
+      samples.push({ relativePath, content, truncated });
+    }
+  };
+  await walk(root, 0);
+  return samples;
+}
+
+/** Render collected samples into the digest handed to the learning agent. */
+export function renderCodeSamples(samples: readonly CodeSample[]): string {
+  return samples
+    .map((sample) =>
+      [
+        `### ${sample.relativePath}${sample.truncated ? " (truncated)" : ""}`,
+        sample.content.trimEnd(),
+      ].join("\n"),
+    )
+    .join("\n\n");
+}
+
+/**
+ * The code-learning agent prompt: distill durable style conventions from the
+ * sample code itself — naming, structure, testing and error-handling habits —
+ * as taste bullets. Evidence-based only; original wording.
+ */
+export function codeLearnerSystemPrompt(): string {
+  return [
+    "You maintain the taste files for a coding agent. This pass learns from",
+    "an existing codebase: the sample files below reveal how this user's",
+    "projects are actually written. Extract the durable conventions a coding",
+    "agent should follow when writing NEW code for them.",
+    "",
+    "Look for: naming style, module/file organization, error-handling and",
+    "logging habits, testing approach, dependency and tooling choices,",
+    "comment density, and formatting conventions that are consistent across",
+    "files.",
+    "",
+    "Rules:",
+    "- Every bullet must be evidence from the sample code. Do not invent",
+    "  preferences, and do not restate generic best practices.",
+    "- Only record conventions visible in more than one place, or unambiguous",
+    "  in one (e.g. an explicit lint/format config).",
+    "- Each learning is one markdown bullet ending in a confidence score:",
+    "  - Uses vitest with colocated *.test.ts files. Confidence: 0.9",
+    "- Keep bullets short and actionable for an agent writing new code.",
+    "- You may organize into category files ({category}/taste.md) or use the",
+    "  root taste.md; keep every file under 8 KB.",
+    "",
+    "Use the tools to update the files. A taste path MUST be either",
+    '"taste.md" or "{category}/taste.md".',
+    "",
+    "When the sample reveals nothing durable and specific, make no tool calls",
+    'and reply with exactly: no changes',
+  ].join("\n");
+}
+
+export interface CodebaseTasteInput {
+  models: Pick<Models, "complete">;
+  model: Model<any>;
+  cwd: string;
+  /** Repository to learn conventions from (defaults to cwd). */
+  repoDir: string;
+  signal?: AbortSignal | undefined;
+}
+
+/**
+ * Learn taste from a codebase: collect a deterministic sample, run the taste
+ * tool loop with the code-learning prompt, and commit to this project's
+ * taste files.
+ */
+export async function runCodebaseTasteLearning(
+  input: CodebaseTasteInput,
+): Promise<TasteLearningOutcome & { samples: number }> {
+  const samples = await collectCodeSamples(input.repoDir);
+  if (samples.length === 0) {
+    return { updated: false, reason: "skipped-empty", entries: 0, samples: 0 };
+  }
+  const outcome = await runTasteToolLoop({
+    models: input.models,
+    model: input.model,
+    cwd: input.cwd,
+    systemPrompt: codeLearnerSystemPrompt(),
+    userContent: [
+      `Code samples from the repository at ${input.repoDir} (${samples.length} files, trimmed where marked):`,
+      "",
+      renderCodeSamples(samples),
+    ].join("\n"),
+    signal: input.signal,
+  });
+  return { ...outcome, samples: samples.length };
 }

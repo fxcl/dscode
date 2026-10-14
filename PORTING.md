@@ -29,6 +29,9 @@
 | 19 | 50% 轻裁剪档（三级化：50/80/90） | `context-prune.ts` 双档化 | 8 |
 | 20 | 跨 provider 配额降级链（错误分类 + 单向切换重放） | `fallback.ts` + `/fallback` | 9 |
 | 21 | MCP 凭据保险库（按名存取 + `${vault:}` 引用） | `mcp-vault.ts` + `/vault` | 9 |
+| 22 | 从代码库学 taste（采样 + 证据约束蒸馏） | `taste.ts` `/taste learn [dir]` | 10 |
+| 23 | Cursor 会话导入（第三家源，编码变体探测） | `competitor-sessions.ts` | 10 |
+| 24 | 压缩次级提示（会话长度 / 图片权重，一次性） | `context-prune.ts` | 10 |
 
 ## 关键设计对照
 
@@ -74,6 +77,17 @@
   MCP 配置的 env/headers 用 `${vault:NAME}` 引用；引用缺失时该 server
   连接失败并给出可用条目列表（快速失败，不传未解析字面量）。仅本地
   命令管理（`/vault set|remove`），密钥值不进入模型上下文。
+- **代码库学 taste**：`/taste learn [dir]`（缺省当前项目）——确定性采样
+  （仅代码扩展名，跳过依赖/构建/隐藏目录，单文件 8KB / 总量 96KB / 60 个
+  文件上限），复用 taste 工具循环以"代码学习"提示词蒸馏**有据可查**的
+  风格约定（要求约定在多处可见或来自显式配置，禁止泛泛的最佳实践），
+  写入本项目 taste 文件；无效输出整份回滚（与对话学习同一不变式）。
+- **Cursor 导入**：`~/.cursor/projects/<编码>/agent-transcripts`，项目目录
+  编码生成多个连字符变体逐一探测；提取器同时容忍 JSONL、JSON 数组和
+  messages 对象三种历史格式，与 Codex 同源的 schema 漂移容忍匹配器。
+- **压缩次级提示**：上下文 ≥50%（轻档门槛）后各提醒一次——会话消息数
+  超 50 建议开新会话；上下文图片 ≥3 张提示每张约 1.5k token、压缩前
+  清理不再需要的截图。
 
 ## 与 command-code 的有意差异
 
@@ -120,4 +134,5 @@
 测试：`test/taste.test.ts`、`test/guardrails.test.ts`、`test/batch4.test.ts`、`test/scheduler.test.ts`、
 `test/hook-trust.test.ts`、`test/hooks.test.ts`（更新：注入 home + 信任种子 + 审计断言）、
 `test/batch8.test.ts`（批次 8：双档裁剪/图片处理/预算/goal loop/stop 续跑，23 用例）、
-`test/batch9.test.ts`（批次 9：错误分类/备用选择/保险库，10 用例）。
+`test/batch9.test.ts`（批次 9：错误分类/备用选择/保险库，10 用例）、
+`test/batch10.test.ts`（批次 10：代码采样/学习回滚/Cursor 提取/次级提示，12 用例）。

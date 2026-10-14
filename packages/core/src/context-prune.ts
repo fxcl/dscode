@@ -10,8 +10,7 @@ import { estimateTextTokens } from "./guardrails.js";
  */
 
 /** Context ratio at which the light tier activates. */
-export const TIER1_PRUNE_AT = 0.5;
-/** Context ratio at which the light tier deactivates again (hysteresis). */
+export const TIER1_PRUNE_AT = 0.5;/** Context ratio at which the light tier deactivates again (hysteresis). */
 export const TIER1_PRUNE_RESET_AT = 0.45;
 /** Tool results kept intact by the light tier. */
 export const TIER1_KEEP_RECENT_TOOL_RESULTS = 20;
@@ -110,4 +109,39 @@ export function pruneOldToolResults(
     pruned += 1;
   }
   return pruned > 0 ? output : (messages as AgentMessage[]);
+}
+
+/** Messages above which a fresh-session nudge fires (secondary tip). */
+export const SECONDARY_TIP_MIN_MESSAGES = 50;
+/** Images in context above which the image-weight tip fires. */
+export const SECONDARY_TIP_MIN_IMAGES = 3;
+/** Documentation constant: approximate tokens one in-context image costs. */
+export const IMAGE_TOKEN_ESTIMATE = 1_500;
+
+/**
+ * Secondary context tips, shown alongside the prune/compaction nudges once
+ * usage has reached the light tier: session length and image weight. Returns
+ * stable keys (for once-per-session dedup) and at most one line each; empty
+ * when there is nothing worth saying.
+ */
+export function secondaryContextTips(
+  ratio: number,
+  messageCount: number,
+  imageCount: number,
+): Array<{ key: string; text: string }> {
+  if (ratio < TIER1_PRUNE_AT) return [];
+  const tips: Array<{ key: string; text: string }> = [];
+  if (messageCount > SECONDARY_TIP_MIN_MESSAGES) {
+    tips.push({
+      key: "secondary-messages",
+      text: `Context carries ${messageCount} messages — after this task, consider a fresh session (old tool outputs are already pruned from requests, but the transcript keeps growing).`,
+    });
+  }
+  if (imageCount >= SECONDARY_TIP_MIN_IMAGES) {
+    tips.push({
+      key: "secondary-images",
+      text: `${imageCount} images in context (~${IMAGE_TOKEN_ESTIMATE.toLocaleString()} tokens each) — drop screenshots you no longer need before the full compaction.`,
+    });
+  }
+  return tips;
 }

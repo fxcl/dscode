@@ -18,6 +18,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import path from "node:path";
 import {
   commandNeedsNetwork,
   detectSandboxBoundary,
@@ -34,6 +35,7 @@ import {
   KEEP_RECENT_TOOL_RESULTS,
   pruneOldToolResults,
   resolvePruneTier,
+  secondaryContextTips,
   type PruneTierState,
 } from "./context-prune.js";
 import {
@@ -116,6 +118,7 @@ import {
   learnFromNewMessages,
   markLearned,
   readTasteFile,
+  runCodebaseTasteLearning,
   runTasteLearning,
   setTasteEnabled,
   tasteFileFor,
@@ -496,6 +499,34 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
             "Context 80% — auto-compact triggers at 90%. /compact now to free space before it kicks in.",
             "info",
           );
+        }
+
+        // Secondary tips: session length and image weight, once each, only
+        // once the light prune tier is engaged (same 50% gate).
+        if (settledRatio >= 0.5) {
+          let messageCount = 0;
+          let imageCount = 0;
+          for (const entry of ctx.sessionManager.getEntries()) {
+            if (entry.type !== "message") continue;
+            messageCount += 1;
+            const content = (entry.message as { content?: unknown }).content;
+            if (Array.isArray(content)) {
+              for (const block of content) {
+                if (
+                  typeof block === "object" &&
+                  block !== null &&
+                  (block as { type?: unknown }).type === "image"
+                ) {
+                  imageCount += 1;
+                }
+              }
+            }
+          }
+          for (const tip of secondaryContextTips(settledRatio, messageCount, imageCount)) {
+            if (tierTipsNotified.has(tip.key)) continue;
+            tierTipsNotified.add(tip.key);
+            ctx.ui.notify(tip.text, "info");
+          }
         }
 
         // Budget accounting: fold this session's cost delta into the monthly
@@ -937,7 +968,7 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
       });
 
       pi.registerCommand("taste", {
-        description: "Show or manage learned taste (import|on|off|clear)",
+        description: "Show or manage learned taste (import|learn [dir]|on|off|clear)",
         handler: async (args, ctx) => {
           const action = args.trim();
           if (!action) {
@@ -949,7 +980,8 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
                 `taste: ${enabled ? "learning on" : "learning off"}`,
                 `file: ${tasteFileFor(ctx.cwd)} (${entries} entries)`,
                 `lane: ${ctx.model ? resolveLane("learning", ctx.model).laneModelId : "?"} (DSCODE_LEARNING_MODEL to override)`,
-                "import: learn from Claude Code / Codex sessions",
+                "import: learn from Claude Code / Codex / Cursor sessions",
+                "learn: learn style conventions from a codebase",
                 "on | off | clear",
               ].join("\n"),
               "info",
@@ -1027,7 +1059,56 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
             );
             return;
           }
-          ctx.ui.notify("Usage: /taste [import|on|off|clear]", "warning");
+          if (action === "learn" || action.startsWith("learn ")) {
+            const target = action.slice("learn".length).trim() || ctx.cwd;
+            const repoDir = path.resolve(target);
+            const stat = await import("node:fs/promises").then((fs) => fs.stat(repoDir)).catch(() => undefined);
+            if (!stat?.isDirectory()) {
+              ctx.ui.notify(`/taste learn: not a directory: ${repoDir}`, "warning");
+              return;
+            }
+            if (!ctx.model) {
+              ctx.ui.notify("No active model — cannot run taste learning.", "warning");
+              return;
+            }
+            const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
+            if (!auth.ok) {
+              ctx.ui.notify(`No usable credentials for ${ctx.model.provider}: ${auth.error}`, "warning");
+              return;
+            }
+            const lane = buildLaneModels(ctx.model, { apiKey: auth.apiKey, headers: auth.headers });
+            if (!lane) {
+              ctx.ui.notify(`Lane transport unsupported for ${ctx.model.api}.`, "warning");
+              return;
+            }
+            ctx.ui.setWorkingVisible(false);
+            let outcome;
+            try {
+              outcome = await runCodebaseTasteLearning({
+                models: lane.models,
+                model: lane.model,
+                cwd: ctx.cwd,
+                repoDir,
+                ...(ctx.signal ? { signal: ctx.signal } : {}),
+              });
+            } catch (error) {
+              outcome = { updated: false as const, reason: "rejected" as const, entries: 0, samples: 0, error };
+            } finally {
+              ctx.ui.setWorkingVisible(true);
+            }
+            ctx.ui.notify(
+              outcome.updated
+                ? `Learned ${outcome.entries} convention(s) from ${outcome.samples} sample file(s) — ${tasteFileFor(ctx.cwd)}`
+                : outcome.reason === "no-changes"
+                  ? `Scanned ${outcome.samples} file(s) — nothing durable and specific enough to record.`
+                  : outcome.reason === "skipped-empty"
+                    ? "No source files found to sample (code extensions only)."
+                    : `Codebase learning failed${"error" in outcome && outcome.error ? `: ${(outcome.error as Error).message}` : ""}; nothing written.`,
+              outcome.updated ? "info" : outcome.reason === "rejected" ? "warning" : "info",
+            );
+            return;
+          }
+          ctx.ui.notify("Usage: /taste [import|learn [dir]|on|off|clear]", "warning");
         },
       });
 

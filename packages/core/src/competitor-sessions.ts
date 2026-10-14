@@ -9,7 +9,7 @@ import path from "node:path";
  */
 
 export interface CompetitorSessionSource {
-  agent: "claude-code" | "codex";
+  agent: "claude-code" | "codex" | "cursor";
   prompts: string[];
 }
 
@@ -29,6 +29,80 @@ const DEFAULT_MAX_PROMPT_CHARS = 600;
 /** Claude Code encodes a project path into a directory name by dash-joining. */
 export function claudeCodeProjectDirName(projectPath: string): string {
   return projectPath.replace(/[^a-zA-Z0-9]/g, "-");
+}
+
+/**
+ * Cursor stores sessions under ~/.cursor/projects/<encoded>/agent-transcripts.
+ * The exact encoding of the project directory name has drifted across
+ * versions, so several plausible dash-join variants are generated and each is
+ * probed; whichever exists is used.
+ */
+export function cursorProjectDirNames(projectPath: string): string[] {
+  const normalized = projectPath.replaceAll("/", "\\");
+  const variants = new Set<string>([
+    normalized.replace(/[^a-zA-Z0-9]/g, "-"),
+    normalized.replace(/[^a-zA-Z0-9]/g, "-").toLowerCase(),
+    normalized.toLowerCase().replace(/[^a-z0-9]/g, "-"),
+  ]);
+  return [...variants].filter(Boolean);
+}
+
+/**
+ * Best-effort user-prompt extraction from Cursor agent transcripts. The files
+ * have appeared both as JSONL and as whole-file JSON (array or messages
+ * object), so both shapes are attempted with the same schema-drift-tolerant
+ * user-message matcher used for Codex.
+ */
+export function extractCursorPrompts(content: string, maxPrompts: number, maxChars: number): string[] {
+  const prompts: string[] = [];
+  const consider = (parsed: unknown): void => {
+    if (prompts.length >= maxPrompts) return;
+    const message = findUserMessage(parsed, 0);
+    if (!message) return;
+    const cleaned = cleanPrompt(messageTextFrom(message.content), maxChars);
+    if (cleaned) prompts.push(cleaned);
+  };
+  const trimmed = content.trim();
+  if (trimmed.startsWith("[")) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return prompts;
+    }
+    if (Array.isArray(parsed)) for (const entry of parsed) consider(entry);
+    return prompts;
+  }
+  if (trimmed.startsWith("{")) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      parsed = undefined;
+    }
+    if (parsed !== undefined) {
+      if (isRecord(parsed) && Array.isArray(parsed.messages)) {
+        for (const entry of parsed.messages) consider(entry);
+      } else {
+        consider(parsed);
+      }
+      if (prompts.length > 0) return prompts;
+      // Fall through to line-by-line scanning for NDJSON-with-noise files.
+    }
+  }
+  for (const line of trimmed.split("\n")) {
+    if (prompts.length >= maxPrompts) break;
+    const candidate = line.trim();
+    if (!candidate) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+    consider(parsed);
+  }
+  return prompts;
 }
 
 function homeDir(home?: string): string {
@@ -221,6 +295,51 @@ async function listCodexRolloutFiles(root: string, limit: number): Promise<strin
   return files.slice(0, limit);
 }
 
+/** Scan Cursor agent transcripts for the given project (encoding probed). */
+export async function scanCursorPrompts(
+  projectPath: string,
+  options: CompetitorScanOptions & { home?: string } = {},
+): Promise<CompetitorSessionSource | undefined> {
+  const projectsRoot = path.join(homeDir(options.home), ".cursor", "projects");
+  const maxSessions = options.maxSessions ?? DEFAULT_MAX_SESSIONS;
+  const maxPerSession = options.maxPromptsPerSession ?? DEFAULT_MAX_PROMPTS_PER_SESSION;
+  const maxChars = options.maxPromptChars ?? DEFAULT_MAX_PROMPT_CHARS;
+  for (const dirName of cursorProjectDirNames(projectPath)) {
+    const transcripts = path.join(projectsRoot, dirName, "agent-transcripts");
+    const files = await listTranscriptFiles(transcripts, maxSessions);
+    if (files.length === 0) continue;
+    const prompts = await readPrompts(files, maxPerSession * maxSessions, maxChars, extractCursorPrompts);
+    if (prompts.length > 0) return { agent: "cursor", prompts };
+  }
+  return undefined;
+}
+
+/** Newest-first transcript files; Cursor uses .jsonl/.json (or extension-less). */
+async function listTranscriptFiles(dir: string, limit: number): Promise<string[]> {
+  let names: string[];
+  try {
+    names = await readdir(dir);
+  } catch {
+    return [];
+  }
+  const files = names.filter((name) => /\.(jsonl|json)$/.test(name) || !name.includes("."));
+  const withTimes = await Promise.all(
+    files.map(async (name) => {
+      const full = path.join(dir, name);
+      try {
+        return { full, mtimeMs: (await stat(full)).mtimeMs };
+      } catch {
+        return undefined;
+      }
+    }),
+  );
+  return withTimes
+    .filter((entry): entry is { full: string; mtimeMs: number } => entry !== undefined)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .slice(0, limit)
+    .map((entry) => entry.full);
+}
+
 /** Scan every supported competitor agent; sources with no sessions are omitted. */
 export async function scanAllCompetitorPrompts(
   projectPath: string,
@@ -229,6 +348,7 @@ export async function scanAllCompetitorPrompts(
   const sources = await Promise.all([
     scanClaudeCodePrompts(projectPath, options),
     scanCodexPrompts(options),
+    scanCursorPrompts(projectPath, options),
   ]);
   return sources.filter((source): source is CompetitorSessionSource => source !== undefined);
 }
