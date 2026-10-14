@@ -116,32 +116,56 @@ export function buildWindowsSandboxCommand(
   };
 }
 
+/**
+ * Shell used inside the native sandbox. PowerShell 7 is preferred (better
+ * non-interactive behavior); the Windows PowerShell 5.1 that ships with the OS
+ * is accepted as a fallback so a stock Windows host can still run sandboxed
+ * commands. The fallback is reported in the invocation description rather than
+ * hidden.
+ */
 function nativePowerShellCommand(shellCommand: string): ShellInvocation {
   const configured = process.env.DSCODE_SHELL?.trim();
   if (configured) {
     const resolved = path.resolve(configured);
-    if (path.basename(resolved).toLowerCase() !== "pwsh.exe" || !fs.existsSync(resolved)) {
-      throw new Error("The Windows native sandbox requires DSCODE_SHELL to point to pwsh.exe.");
+    if (!fs.existsSync(resolved)) {
+      throw new Error(`DSCODE_SHELL does not exist: ${resolved}`);
     }
     return powerShellInvocation(resolved, shellCommand);
   }
   const pathValue = process.env.PATH ?? "";
-  for (const entry of pathValue.split(path.delimiter)) {
-    const directory = entry.trim().replace(/^"|"$/g, "");
-    if (!directory) continue;
-    const candidate = path.join(directory, "pwsh.exe");
+  const directories = pathValue
+    .split(path.delimiter)
+    .map((entry) => entry.trim().replace(/^"|"$/g, ""))
+    .filter(Boolean);
+  // PowerShell 7 first, then the in-box 5.1.
+  for (const name of ["pwsh.exe", "powershell.exe"]) {
+    for (const directory of directories) {
+      const candidate = path.join(directory, name);
+      if (fs.existsSync(candidate)) return powerShellInvocation(candidate, shellCommand);
+    }
+  }
+  const systemRoot = process.env.SystemRoot ?? "C:\\Windows";
+  for (const relative of [
+    path.join("System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    path.join("System32", "WindowsPowerShell", "v1.0", "pwsh.exe"),
+  ]) {
+    const candidate = path.join(systemRoot, relative);
     if (fs.existsSync(candidate)) return powerShellInvocation(candidate, shellCommand);
   }
   throw new Error(
-    "The experimental Windows native sandbox requires PowerShell 7 (pwsh.exe).",
+    "The Windows native sandbox needs PowerShell: install PowerShell 7 (pwsh.exe) " +
+      "or point DSCODE_SHELL at a powershell.exe path.",
   );
 }
 
 function powerShellInvocation(command: string, shellCommand: string): ShellInvocation {
+  const isPowerShell7 = path.basename(command).toLowerCase() === "pwsh.exe";
   return {
     command,
     args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", shellCommand],
-    description: `PowerShell 7 (${path.basename(command)})`,
+    description: isPowerShell7
+      ? `PowerShell 7 (${path.basename(command)})`
+      : `Windows PowerShell 5.1 (${path.basename(command)}) — install PowerShell 7 (pwsh.exe) for the preferred shell`,
   };
 }
 
