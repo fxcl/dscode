@@ -40,12 +40,29 @@ const hooksConfigSchema = z.object({
 type Hook = z.infer<typeof hookSchema>;
 type HookConfig = z.infer<typeof hooksConfigSchema>["hooks"];
 
+export interface HookRunResult {
+  /** Reason a beforeTool hook blocked the call. */
+  block?: string;
+  /** Reason an agentEnd hook asked the finished session to keep going. */
+  continuation?: string;
+}
+
 export function registerHooks(
   pi: ExtensionAPI,
   getAccess: () => EffectiveAccess,
-  options?: { home?: string },
+  options?: {
+    home?: string;
+    /**
+     * Shared sink for agentEnd continuation requests. The extension reads and
+     * clears it on agent_end; a request is only honored when the payload's
+     * stopHookActive flag is false, so a continuation caused by a hook cannot
+     * trigger another one.
+     */
+    decisions?: { stopContinuation?: string | undefined };
+  },
 ): void {
   const home = options?.home ?? getDSCodeHome();
+  const decisions = options?.decisions;
   let config: HookConfig = {
     sessionStart: [],
     beforeTool: [],
@@ -127,13 +144,19 @@ export function registerHooks(
     );
   });
 
+  let stopHookContinued = false;
+
+  pi.on("before_agent_start", () => {
+    stopHookContinued = false;
+  });
+
   pi.on("tool_call", async (event, ctx) => {
     const result = await runHooks(config.beforeTool, ctx, {
       event: "beforeTool",
       tool: event.toolName,
       input: event.input,
     }, getAccess(), hookAuditReady ? hookAuditFile : undefined);
-    if (result) return { block: true, reason: result };
+    if (result.block) return { block: true, reason: result.block };
     return undefined;
   });
 
@@ -146,7 +169,17 @@ export function registerHooks(
   });
 
   pi.on("agent_end", async (_event, ctx) => {
-    await runHooks(config.agentEnd, ctx, { event: "agentEnd" }, getAccess(), hookAuditReady ? hookAuditFile : undefined);
+    const result = await runHooks(config.agentEnd, ctx, {
+      event: "agentEnd",
+      // Guard against continuation storms: a turn that itself started because
+      // an agentEnd hook asked to continue must not hand the decision back to
+      // hooks again.
+      stopHookActive: stopHookContinued,
+    }, getAccess(), hookAuditReady ? hookAuditFile : undefined);
+    if (result.continuation && !stopHookContinued && decisions) {
+      stopHookContinued = true;
+      decisions.stopContinuation = result.continuation;
+    }
   });
 }
 
@@ -179,7 +212,8 @@ async function runHooks(
   payload: Record<string, unknown>,
   access: EffectiveAccess,
   auditFile: string | undefined,
-): Promise<string | undefined> {
+): Promise<HookRunResult> {
+  const result: HookRunResult = {};
   for (const hook of hooks) {
     const args = hook.args.map((argument) =>
       argument
@@ -196,9 +230,9 @@ async function runHooks(
       network: access.network,
     });
     const started = Date.now();
-    let result;
+    let run;
     try {
-      result = await runProcess(invocation.command, invocation.args, {
+      run = await runProcess(invocation.command, invocation.args, {
         cwd: ctx.cwd,
         signal: ctx.signal,
         timeoutMs: hook.timeoutMs,
@@ -223,20 +257,57 @@ async function runHooks(
         ...(typeof payload.tool === "string" ? { tool: payload.tool } : {}),
         commandHash: hookCommandHash(hook.command, hook.args),
         command: hook.command,
-        outcome: result.exitCode === 0 ? "success" : "blocked",
-        exitCode: result.exitCode ?? -1,
+        outcome: run.exitCode === 0 ? "success" : "blocked",
+        exitCode: run.exitCode ?? -1,
         durationMs: Date.now() - started,
       }).catch(() => {});
     }
-    if (result.exitCode !== 0) {
-      return (
-        result.stderr.trim() ||
-        result.stdout.trim() ||
-        `Hook ${hook.command} exited with ${result.exitCode}`
-      );
+    if (run.exitCode !== 0) {
+      result.block =
+        run.stderr.trim() ||
+        run.stdout.trim() ||
+        `Hook ${hook.command} exited with ${run.exitCode}`;
+      return result;
+    }
+    if (payload.event === "agentEnd") {
+      const continuation = parseStopContinuation(run.stdout, payload.stopHookActive === true);
+      if (continuation) {
+        result.continuation = continuation;
+        return result;
+      }
     }
   }
-  return undefined;
+  return result;
+}
+
+/**
+ * Continuation protocol for agentEnd hooks: with exit code 0, a hook may ask
+ * the finished session to keep going by printing JSON on stdout — either
+ * `{"continue": true, "reason": "..."}` or `{"decision": "block", "reason": "..."}`.
+ * A non-empty reason string is required; anything else is ignored. When
+ * stopHookActive is true the request is refused (no chained continuations).
+ * Original wording for the truncation bound and semantics.
+ */
+export function parseStopContinuation(stdout: string, stopHookActive: boolean): string | undefined {
+  if (stopHookActive) return undefined;
+  const text = stdout.trim();
+  if (!text.startsWith("{")) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (!isRecordLike(parsed)) return undefined;
+  const requested = parsed.continue === true || parsed.decision === "block";
+  if (!requested || typeof parsed.reason !== "string" || parsed.reason.trim() === "") {
+    return undefined;
+  }
+  return parsed.reason.trim().slice(0, 2_000);
+}
+
+function isRecordLike(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function shellQuote(value: string): string {

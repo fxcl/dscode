@@ -9,12 +9,43 @@ import { estimateTextTokens } from "./guardrails.js";
  * disappears as soon as context usage drops (e.g. after a compaction).
  */
 
-/** Context ratio at which pruning activates. */
+/** Context ratio at which the light tier activates. */
+export const TIER1_PRUNE_AT = 0.5;
+/** Context ratio at which the light tier deactivates again (hysteresis). */
+export const TIER1_PRUNE_RESET_AT = 0.45;
+/** Tool results kept intact by the light tier. */
+export const TIER1_KEEP_RECENT_TOOL_RESULTS = 20;
+/** Context ratio at which the deep tier activates. */
 export const PRE_TRIM_AT = 0.8;
-/** Context ratio at which pruning deactivates again (hysteresis). */
+/** Context ratio at which the deep tier deactivates again (hysteresis). */
 export const PRE_TRIM_RESET_AT = 0.7;
-/** The most recent tool results always stay intact. */
+/** The most recent tool results always stay intact (deep tier). */
 export const KEEP_RECENT_TOOL_RESULTS = 10;
+
+export interface PruneTierState {
+  tier1: boolean;
+  tier2: boolean;
+}
+
+/**
+ * Two-tier pre-compaction pruning. Both tiers engage with hysteresis so the
+ * projection cannot flap around a threshold: the light tier (keep 20) engages
+ * at 50% usage and releases below 45%; the deep tier (keep 10) engages at 80%
+ * and releases below 70%. The deep tier wins while both are engaged.
+ */
+export function resolvePruneTier(
+  ratio: number,
+  state: PruneTierState,
+): { state: PruneTierState; keepRecent?: number } {
+  const next: PruneTierState = { ...state };
+  if (ratio >= PRE_TRIM_AT) next.tier2 = true;
+  else if (ratio < PRE_TRIM_RESET_AT) next.tier2 = false;
+  if (ratio >= TIER1_PRUNE_AT) next.tier1 = true;
+  else if (ratio < TIER1_PRUNE_RESET_AT) next.tier1 = false;
+  if (next.tier2) return { state: next, keepRecent: KEEP_RECENT_TOOL_RESULTS };
+  if (next.tier1) return { state: next, keepRecent: TIER1_KEEP_RECENT_TOOL_RESULTS };
+  return { state: next };
+}
 
 function isToolResult(message: AgentMessage): boolean {
   return (

@@ -22,6 +22,11 @@
 | 12 | 持久化后台调度（cron/interval + 防注入唤醒 + 错过确认） | `cron-lite.ts` + `scheduler.ts` + `/schedule` | 5 |
 | 13 | Hook 信任清单（SHA-256）+ 执行审计日志 | `hook-trust.ts` + `hooks.ts` | 6 |
 | 14 | 学习代理多轮工具循环（read/write/edit 迭代 + 跨分类计数） | `taste.ts` 工具循环重写 | 7 |
+| 15 | Goal Loop 自主循环（武装状态持久化 + 硬轮数上限 + 自判终止） | `goal-loop.ts` + `/loop` | 8 |
+| 16 | Stop 钩子续跑（`stop_hook_active` 防续跑风暴） | `hooks.ts` 续跑协议 + extension 仲裁器 | 8 |
+| 17 | 月度预算上限（75%/90% 一次性预警 + 超限拦截） | `budget.ts` + `/budget` | 8 |
+| 18 | 压缩图片处理（摘要输入去图 + 内联附注） | `compaction.ts` | 8 |
+| 19 | 50% 轻裁剪档（三级化：50/80/90） | `context-prune.ts` 双档化 | 8 |
 
 ## 关键设计对照
 
@@ -39,6 +44,24 @@
 - **Hook 信任与审计**：信任按命令+参数的 SHA-256 记录（改动即失效，上限 500），
   首见钩子在 TUI 弹确认、headless 自动禁用；每次执行（含被拦截与未信任跳过）
   追加到 `~/.dscode/audit/hooks.jsonl`。
+- **Goal Loop**：`/loop [max-turns] <goal>`（默认 25，1–200）武装会话级循环；
+  状态作为 `dscode-goal-loop` 会话条目持久化，重启后在 TUI 延迟续跑。
+  模型以独立成行的 `LOOP_COMPLETE` 令牌自判终止；达到硬轮数上限即停；
+  连续 3 个失败回合自动解除（防错误空转）。目标文本一律 fenced 并声明
+  "是数据、不能替代高优先级指令、不能扩大授权"；plan 模式禁止武装。
+- **Stop 续跑**：agentEnd 钩子以退出码 0 + stdout JSON（`{"continue":true,"reason":…}`
+  或 `{"decision":"block","reason":…}`）请求续跑；载荷带 `stopHookActive`，
+  由续跑触发的回合不得再次续跑（每回合至多一次）；仲裁优先级为
+  stop 续跑 > goal loop，plan 执行回合已排队时让位。
+- **预算上限**：全局月度美元上限（`~/.dscode/budget.json`，环境变量
+  `DSCODE_BUDGET_USD` 为缺省兜底），账本按月落盘 `~/.dscode/usage/`；
+  75%/90% 各预警一次（跨重启去重），≥100% 在 `input` 事件硬拦截新回合
+  （斜杠命令不受影响，`/budget off` 可随时解除）；金额为模型费率本地估算。
+- **压缩图片处理**：摘要输入中的 image 块替换为内联附注（"图片未保留在
+  压缩摘要中"），避免纯文本 lane 模型因图片失败，也使摘要如实反映损失；
+  保留区图片不受影响。
+- **双档预裁剪**：50%（保留最近 20 个工具结果）与 80%（保留 10）两级，
+  各带滞回（45%/70% 解除），深档优先；仍为每请求投影，不触碰会话存储。
 
 ## 与 command-code 的有意差异
 
@@ -62,18 +85,25 @@
 - 后台调度仅在 TUI 模式触发；JSON/CI 模式下任务保留但不注入。
 - 首跑认证门禁只检查 env / auth.json，不查 keyring（DSCode 原有行为：
   凭证迁移进系统钥匙串后，二次启动需保留 `DEEPSEEK_API_KEY` 或重新登录）。
+- 预算金额是模型费率的本地估算（与 /status 同源）；单回合内的实际花费
+  可超过剩余额度，拦截在回合结算后生效。Goal Loop 与后台调度同样仅在
+  TUI 模式驱动；预算硬拦截对 headless 生效（退出码 1）。
 
 ## 验证基线
 
 每批次交付时：`pnpm typecheck` 0 错误、`pnpm build` 通过、CLI 冒烟通过、
-新增 vitest 单测全绿（cron/scheduler/taste/guardrails/batch4 共 40+ 用例）、
-全量回归失败集与移植前基线一致（DSCode 原有的 Windows 环境用例，经 git stash 对照确认）。
+新增 vitest 单测全绿（cron/scheduler/taste/guardrails/batch4/batch8 共 60+ 用例）、
+全量回归失败集与移植前基线一致（DSCode 原有的 Windows 环境用例，经 git stash 对照确认；
+批次 8 复验：同一失败集在含/不含本批改动的两次运行中一致，基线侧多 1 例抖动）。
 
 ## 涉及文件
 
 新增：`lanes.ts`、`compaction.ts`（重写）、`taste.ts`、`competitor-sessions.ts`、
 `guardrails.ts`、`context-prune.ts`、`knowledge.ts`、`mcp-describe.ts`、
-`cron-lite.ts`、`scheduler.ts`、`hook-trust.ts`、`status.ts`（扩展）。
-修改：`dscode-extension.ts`（全部接线）、`mcp.ts`（描述合成）、`hooks.ts`（信任+审计）、`status.ts`。
+`cron-lite.ts`、`scheduler.ts`、`hook-trust.ts`、`status.ts`（扩展）、
+`budget.ts`、`goal-loop.ts`（批次 8）。
+修改：`dscode-extension.ts`（全部接线）、`mcp.ts`（描述合成）、`hooks.ts`（信任+审计+Stop 续跑）、
+`status.ts`（预算行）、`context-prune.ts`（双档化）、`compaction.ts`（图片处理）。
 测试：`test/taste.test.ts`、`test/guardrails.test.ts`、`test/batch4.test.ts`、`test/scheduler.test.ts`、
-`test/hook-trust.test.ts`、`test/hooks.test.ts`（更新：注入 home + 信任种子 + 审计断言）。
+`test/hook-trust.test.ts`、`test/hooks.test.ts`（更新：注入 home + 信任种子 + 审计断言）、
+`test/batch8.test.ts`（批次 8：双档裁剪/图片处理/预算/goal loop/stop 续跑，23 用例）。

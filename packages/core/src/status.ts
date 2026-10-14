@@ -42,6 +42,8 @@ export interface StatusReportDetails {
   mcpServers?: number | undefined;
   serviceTier?: string | undefined;
   guidance?: string[] | undefined;
+  /** Preformatted budget line; shown when a monthly cap is set. */
+  budgetLine?: string | undefined;
 }
 
 export function summarizeSessionUsage(entries: SessionEntry[]): SessionUsageSummary {
@@ -112,6 +114,9 @@ export function formatStatusReport(details: StatusReportDetails): string {
   }
   if (details.serviceTier) {
     lines.push(`tier       ${details.serviceTier}`);
+  }
+  if (details.budgetLine) {
+    lines.push(details.budgetLine);
   }
   if (details.guidance && details.guidance.length > 0) {
     lines.push("", ...details.guidance.map((line) => `hint       ${line}`));

@@ -17,6 +17,68 @@ const AUTO_COMPACT_AT = 0.9;
 const KEEP_RECENT_TOKENS = 60_000;
 const SUMMARY_RESERVE_TOKENS = 32_000;
 
+/**
+ * Inline notice that replaces an image block in the input handed to the
+ * summarizer. Summary models on background lanes are often text-only, and the
+ * image is not preserved by compaction either way — an explicit note keeps the
+ * summary honest about what was lost.
+ */
+export const IMAGE_COMPACTION_NOTICE =
+  "[An image was attached here; it is not preserved in the compacted summary.]";
+
+/**
+ * Replace image blocks in the messages selected for summarization with the
+ * inline notice. Returns the input array unchanged when no images are present.
+ */
+export function stripImagesForSummary(
+  messages: readonly AgentMessage[],
+): { messages: AgentMessage[]; imagesRemoved: number } {
+  let imagesRemoved = 0;
+  let changed = false;
+  const output: AgentMessage[] = new Array(messages.length);
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index]!;
+    const content = (message as { content?: unknown }).content;
+    if (!Array.isArray(content)) {
+      output[index] = message;
+      continue;
+    }
+    let hasImage = false;
+    for (const block of content) {
+      if (
+        typeof block === "object" &&
+        block !== null &&
+        (block as { type?: unknown }).type === "image"
+      ) {
+        hasImage = true;
+        break;
+      }
+    }
+    if (!hasImage) {
+      output[index] = message;
+      continue;
+    }
+    imagesRemoved += content.filter(
+      (block) =>
+        typeof block === "object" &&
+        block !== null &&
+        (block as { type?: unknown }).type === "image",
+    ).length;
+    changed = true;
+    output[index] = {
+      ...message,
+      content: content.map((block) =>
+        typeof block === "object" &&
+        block !== null &&
+        (block as { type?: unknown }).type === "image"
+          ? { type: "text", text: IMAGE_COMPACTION_NOTICE }
+          : block,
+      ),
+    } as AgentMessage;
+  }
+  return changed ? { messages: output, imagesRemoved } : { messages: messages as AgentMessage[], imagesRemoved: 0 };
+}
+
 export interface CompactResult {
   compacted: boolean;
   tokensBefore: number;
@@ -58,6 +120,9 @@ export async function compactPreparationWithLane(
   const laneModel = createLaneModel(sessionModel, lane.laneModelId);
 
   const reserveTokens = preparation.settings.reserveTokens ?? SUMMARY_RESERVE_TOKENS;
+  // Summary models may be text-only and compaction drops images regardless:
+  // hand the summarizer an image-free projection with inline notices instead.
+  const { messages: summaryInput } = stripImagesForSummary(preparation.messagesToSummarize);
   const candidates: Array<{ model: Model<any>; label: string }> = [];
   if (lane.active) candidates.push({ model: laneModel, label: lane.laneModelId });
   candidates.push({ model: sessionModel, label: sessionModel.id });
@@ -66,7 +131,7 @@ export async function compactPreparationWithLane(
   for (const candidate of candidates) {
     try {
       const result = await generateSummaryWithUsageFramework(
-        preparation.messagesToSummarize,
+        summaryInput,
         candidate.model,
         reserveTokens,
         options.apiKey,
