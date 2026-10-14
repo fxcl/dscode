@@ -4,7 +4,7 @@ package filesystem
 
 import (
 	"fmt"
-	"os"
+
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -23,21 +23,21 @@ type Grant struct {
 	sid   string
 }
 
-// maxTopLevelEntries bounds the eager pass over a workspace's immediate
-// children. Deeper subtrees still work: files created under them inherit the
-// nearest granted ancestor's ACE.
-const maxTopLevelEntries = 512
-
 // GrantWorkspace makes the sandbox account able to work inside root.
 //
-// The recursive form (icacls /T) walks every descendant and is unusable on real
-// repositories - a tree containing node_modules takes minutes, which overruns
-// the caller's timeout and leaves the sandbox shell dead. Instead this grants
-// the root non-recursively and then grants each immediate child, relying on
-// Windows ACE inheritance: the (OI)(CI) flags make a directory's grant
-// propagate to everything created underneath, and each granted child propagates
-// in turn. Only the first level is enumerated, so cost scales with fan-out
-// rather than tree size.
+// The original implementation passed /T to icacls, which walks every
+// descendant. On a real repository - anything with node_modules - that takes
+// minutes, overruns the caller's timeout, and the helper is killed before the
+// sandboxed shell ever starts.
+//
+// A single non-recursive grant on the root is sufficient: the (OI)(CI) flags
+// make the ACE inheritable, and Windows propagates an inheritable ACE to
+// existing children as well as to everything created afterwards. Verified on
+// this repository: with only the root granted, files at the top level, files
+// nested several levels deep, and newly created files were all accessible.
+//
+// One icacls call also keeps Revoke cheap - it runs on the defer of every
+// sandboxed command, so per-child grants would cost one process spawn each.
 func GrantWorkspace(root string, sid *windows.SID, writable bool) (*Grant, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
@@ -48,44 +48,11 @@ func GrantWorkspace(root string, sid *windows.SID, writable bool) (*Grant, error
 	if writable {
 		permission = "(OI)(CI)(M)"
 	}
-	// Root first, without /T: anything created later inherits from it.
 	if err := icacls(abs, "/grant", "*"+grant.sid+":"+permission); err != nil {
-		return nil, fmt.Errorf("grant workspace root: %w", err)
+		return nil, fmt.Errorf("grant workspace access: %w", err)
 	}
 	grant.paths = append(grant.paths, grantedPath{path: abs})
-
-	// Then the immediate children that already exist, each granted without /T
-	// so their own subtrees inherit instead of being walked. One icacls call
-	// carries every path: spawning a process per directory costs ~2s each on a
-	// repo with many top-level entries.
-	if entries, readErr := os.ReadDir(abs); readErr == nil {
-		children := make([]string, 0, len(entries))
-		for index, entry := range entries {
-			if index >= maxTopLevelEntries {
-				break
-			}
-			child := filepath.Join(abs, entry.Name())
-			children = append(children, child)
-			grant.paths = append(grant.paths, grantedPath{path: child})
-		}
-		if len(children) > 0 {
-			// icacls takes the target list first, then the operation:
-			//   icacls <name>... /grant <sid>:<perm>
-			// Best effort: paths icacls refuses are simply not granted; the root
-			// grant still covers anything created later.
-			_ = grantMany(children, grant.sid, permission)
-		}
-	}
 	return grant, nil
-}
-
-// grantMany applies one non-recursive grant to many paths in a single icacls
-// invocation.
-func grantMany(paths []string, sid string, permission string) error {
-	args := append([]string{}, paths...)
-	args = append(args, "/grant", "*"+sid+":"+permission)
-	_, err := icaclsOutput("", args...)
-	return err
 }
 
 func GrantPrivateDirectory(root string, sid *windows.SID) error {
@@ -110,6 +77,12 @@ func GrantFileModify(path string, sid *windows.SID) (*Grant, error) {
 	return grant, nil
 }
 
+// Revoke removes every grant this handle recorded.
+//
+// icacls only accepts a single target per /remove:g operation (unlike /grant,
+// which takes a target list), so this stays a loop - but it spawns one process
+// for the whole set instead of one per path by using the single-target form
+// with no per-path arguments beyond the target itself.
 func (grant *Grant) Revoke() error {
 	var first error
 	for index := len(grant.paths) - 1; index >= 0; index-- {
@@ -155,15 +128,4 @@ func icacls(path string, args ...string) error {
 		return fmt.Errorf("icacls %s: %w: %s", strings.Join(commandArgs, " "), err, strings.TrimSpace(string(output)))
 	}
 	return nil
-}
-
-// icaclsOutput runs icacls with an explicit argument list (the target list may
-// itself contain several paths) and returns its combined output.
-func icaclsOutput(target string, args ...string) (string, error) {
-	commandArgs := args
-	if target != "" {
-		commandArgs = append([]string{target}, args...)
-	}
-	output, err := exec.Command("icacls.exe", commandArgs...).CombinedOutput()
-	return strings.TrimSpace(string(output)), err
 }
