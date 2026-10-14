@@ -4,6 +4,7 @@ package filesystem
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,21 @@ type Grant struct {
 	sid   string
 }
 
+// maxTopLevelEntries bounds the eager pass over a workspace's immediate
+// children. Deeper subtrees still work: files created under them inherit the
+// nearest granted ancestor's ACE.
+const maxTopLevelEntries = 512
+
+// GrantWorkspace makes the sandbox account able to work inside root.
+//
+// The recursive form (icacls /T) walks every descendant and is unusable on real
+// repositories - a tree containing node_modules takes minutes, which overruns
+// the caller's timeout and leaves the sandbox shell dead. Instead this grants
+// the root non-recursively and then grants each immediate child, relying on
+// Windows ACE inheritance: the (OI)(CI) flags make a directory's grant
+// propagate to everything created underneath, and each granted child propagates
+// in turn. Only the first level is enumerated, so cost scales with fan-out
+// rather than tree size.
 func GrantWorkspace(root string, sid *windows.SID, writable bool) (*Grant, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
@@ -32,12 +48,44 @@ func GrantWorkspace(root string, sid *windows.SID, writable bool) (*Grant, error
 	if writable {
 		permission = "(OI)(CI)(M)"
 	}
-	if err := icacls(abs, "/grant", "*"+grant.sid+":"+permission, "/T", "/C", "/Q"); err != nil {
-		_ = grant.Revoke()
-		return nil, fmt.Errorf("grant workspace access: %w", err)
+	// Root first, without /T: anything created later inherits from it.
+	if err := icacls(abs, "/grant", "*"+grant.sid+":"+permission); err != nil {
+		return nil, fmt.Errorf("grant workspace root: %w", err)
 	}
-	grant.paths = append(grant.paths, grantedPath{path: abs, recursive: true})
+	grant.paths = append(grant.paths, grantedPath{path: abs})
+
+	// Then the immediate children that already exist, each granted without /T
+	// so their own subtrees inherit instead of being walked. One icacls call
+	// carries every path: spawning a process per directory costs ~2s each on a
+	// repo with many top-level entries.
+	if entries, readErr := os.ReadDir(abs); readErr == nil {
+		children := make([]string, 0, len(entries))
+		for index, entry := range entries {
+			if index >= maxTopLevelEntries {
+				break
+			}
+			child := filepath.Join(abs, entry.Name())
+			children = append(children, child)
+			grant.paths = append(grant.paths, grantedPath{path: child})
+		}
+		if len(children) > 0 {
+			// icacls takes the target list first, then the operation:
+			//   icacls <name>... /grant <sid>:<perm>
+			// Best effort: paths icacls refuses are simply not granted; the root
+			// grant still covers anything created later.
+			_ = grantMany(children, grant.sid, permission)
+		}
+	}
 	return grant, nil
+}
+
+// grantMany applies one non-recursive grant to many paths in a single icacls
+// invocation.
+func grantMany(paths []string, sid string, permission string) error {
+	args := append([]string{}, paths...)
+	args = append(args, "/grant", "*"+sid+":"+permission)
+	_, err := icaclsOutput("", args...)
+	return err
 }
 
 func GrantPrivateDirectory(root string, sid *windows.SID) error {
@@ -107,4 +155,15 @@ func icacls(path string, args ...string) error {
 		return fmt.Errorf("icacls %s: %w: %s", strings.Join(commandArgs, " "), err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+// icaclsOutput runs icacls with an explicit argument list (the target list may
+// itself contain several paths) and returns its combined output.
+func icaclsOutput(target string, args ...string) (string, error) {
+	commandArgs := args
+	if target != "" {
+		commandArgs = append([]string{target}, args...)
+	}
+	output, err := exec.Command("icacls.exe", commandArgs...).CombinedOutput()
+	return strings.TrimSpace(string(output)), err
 }

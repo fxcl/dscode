@@ -199,6 +199,7 @@ export async function runDSCode(argv: string[]): Promise<void> {
   await ensureFirstRunAuth({
     providerId: parsed.options.providerId,
     piArgs: parsed.piArgs,
+    baseUrl: parsed.options.baseUrl,
   });
   installPiLoginSecretMask();
   installPiMarkdownCodeBlocks();

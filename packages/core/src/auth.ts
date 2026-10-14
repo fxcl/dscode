@@ -20,6 +20,7 @@ import {
   type SupportedProviderId,
 } from "./providers.js";
 import {
+  DEFAULT_DEEPSEEK_BASE_URL,
   getDSCodeSettingsPath,
   getDSCodeStorageSettings,
   normalizeDeepSeekBaseUrl,
@@ -150,14 +151,29 @@ export function isInteractiveInvocation(piArgs: string[]): boolean {
   return mode === undefined || mode === "tui" || mode === "interactive";
 }
 
+/** True when the active endpoint is not the provider's own default host. */
+export function isCustomGateway(providerId: SupportedProviderId, baseUrl?: string): boolean {
+  const value = baseUrl?.trim();
+  if (!value) return false;
+  if (providerId !== "deepseek") return true;
+  try {
+    const parsed = new URL(value);
+    return parsed.host.toLowerCase() !== new URL(DEFAULT_DEEPSEEK_BASE_URL).host.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
 export async function ensureFirstRunAuth(options: {
   providerId: SupportedProviderId;
   piArgs: string[];
+  /** Active endpoint; a non-default host means a custom/self-hosted gateway. */
+  baseUrl?: string;
 }): Promise<void> {
   if (options.providerId === "amazon-bedrock") {
     try {
 // @ts-ignore
-      const { fromNodeProviderChain } = await import("@aws-sdk/credential-provider-node");
+      const { fromNodeProviderChain } = await import("@aws-sdk/credential-provider-chain");
       await fromNodeProviderChain()();
       return;
     } catch {
@@ -173,6 +189,19 @@ export async function ensureFirstRunAuth(options: {
     Boolean(environmentKey && process.env[environmentKey]?.trim()) ||
     (await hasStoredProviderCredential(options.providerId));
   if (configured || isInteractiveInvocation(options.piArgs)) return;
+
+  // The provider id can point at a custom gateway (a MiniMax endpoint reached
+  // through the deepseek provider, say). Naming the upstream vendor there
+  // would be wrong: the missing credential belongs to whatever serves baseUrl,
+  // not to the vendor the provider id is named after.
+  if (isCustomGateway(options.providerId, options.baseUrl)) {
+    const envHint = environmentKey ? ` or set ${environmentKey}` : "";
+    throw new Error(
+      `No API key configured for the custom endpoint ${options.baseUrl}. ` +
+        `Set it in the terminal that launches DSCode${envHint}, or run \`dscode login ${options.providerId}\` to store it. ` +
+        "Credentials held only in the system keyring are not detected by this check.",
+    );
+  }
 
   const environmentHint = environmentKey ? ` or set ${environmentKey}` : "";
   throw new Error(
