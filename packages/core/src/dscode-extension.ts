@@ -23,6 +23,18 @@ import { stat as statFile } from "node:fs/promises";
 import { createRereadGuard } from "./reread-guard.js";
 import { registerSleepTool } from "./sleep.js";
 import {
+  collectEnvironmentContext,
+  renderEnvironmentContext,
+  type EnvironmentContext,
+} from "./env-context.js";
+import {
+  acquireInstanceLock,
+  instanceLockPathFor,
+  releaseInstanceLock,
+  watchInstanceLock,
+  type InstanceLockInfo,
+} from "./instance-lock.js";
+import {
   buildMonitorWakeupPrompt,
   buildSelfWakeupPrompt,
   MAX_WAKEUP_CHAIN,
@@ -368,6 +380,13 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
         pingedRunning: boolean;
       }
       const monitors = new Map<string, MonitorState>();
+      // Environment context: session facts collected once, injected per turn.
+      let envContext: EnvironmentContext | undefined;
+      // Instance lock: when another live DSCode process owns this project's
+      // lock, this instance defers the autonomous surfaces to it.
+      let instanceLockLost: InstanceLockInfo | undefined;
+      let instanceLockWatch: ReturnType<typeof watchInstanceLock> | undefined;
+      const ownsScheduling = (): boolean => instanceLockLost === undefined;
       const access = new SessionAccessController(options.sandbox, options.network);
       const effectiveAccess = (): EffectiveAccess => access.effective(permission);
 
@@ -500,6 +519,7 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
       const sendMonitorPing = (state: MonitorState, exited: boolean, exitCode?: number | null): void => {
         const monitorCtx = schedulerCtx;
         if (!monitorCtx || monitorCtx.mode !== "tui") return;
+        if (!ownsScheduling()) return;
         void pi.sendUserMessage(
           buildMonitorWakeupPrompt({
             processId: state.processId,
@@ -652,6 +672,7 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
               wakeupTimer = undefined;
               const monitorCtx = schedulerCtx;
               if (!monitorCtx || monitorCtx.mode !== "tui" || !pendingWakeup) return;
+              if (!ownsScheduling()) return;
               const payload = pendingWakeup;
               void pi.sendUserMessage(buildSelfWakeupPrompt(payload, sequence), { deliverAs: "followUp" });
             },
@@ -816,6 +837,33 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
         if (ideClient) {
           ctx.ui.notify("IDE bridge connected — editor context and diagnostics available.", "info");
         }
+        // Environment facts for the system prompt: collected once per session.
+        envContext = await collectEnvironmentContext(ctx.cwd).catch(() => undefined);
+        // Instance lock: the first live DSCode on a project drives the
+        // autonomous surfaces; a second defers until the lock frees up.
+        instanceLockLost = undefined;
+        instanceLockWatch?.stop();
+        instanceLockWatch = undefined;
+        const lockPath = instanceLockPathFor(ctx.cwd);
+        const acquired = await acquireInstanceLock(lockPath, {
+          pid: process.pid,
+          cwd: ctx.cwd,
+          startedAt: new Date().toISOString(),
+        }).catch(() => ({ ok: true as const }));
+        if (!acquired.ok) {
+          instanceLockLost = acquired.holder;
+          ctx.ui.notify(
+            `Another DSCode instance (pid ${acquired.holder.pid}) is running in this project — background schedules, goal loop resumption, and wakeups stay with it. They resume here automatically when that instance exits.`,
+            "info",
+          );
+          instanceLockWatch = watchInstanceLock(lockPath, process.pid, () => {
+            instanceLockLost = undefined;
+            const regainedCtx = schedulerCtx;
+            if (regainedCtx?.hasUI) {
+              regainedCtx.ui.notify("Project lock released — this instance now drives schedules and wakeups again.", "info");
+            }
+          }, 5_000);
+        }
         updateStatus(ctx);
         ctx.ui.setHiddenThinkingLabel(
           formatThinkingLabel(ctx.model?.name ?? ctx.model?.id ?? options.modelId),
@@ -861,7 +909,7 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
         }
         // Resume an armed goal loop left over from a previous run (deferred
         // so the session finishes starting before the loop turn begins).
-        if (goalLoop?.active && ctx.mode === "tui") {
+        if (goalLoop?.active && ctx.mode === "tui" && ownsScheduling()) {
           ctx.ui.notify(
             `Goal loop resumed (turn ${goalLoop.turn}/${goalLoop.maxTurns}): ${oneLine(goalLoop.goal, 80)} — /loop stop to end.`,
             "info",
@@ -1045,6 +1093,11 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
           if (monitor.timer) clearTimeout(monitor.timer);
         }
         monitors.clear();
+        instanceLockWatch?.stop();
+        instanceLockWatch = undefined;
+        if (ownsScheduling()) {
+          await releaseInstanceLock(instanceLockPathFor(ctx.cwd), process.pid).catch(() => {});
+        }
       });
 
       pi.on("before_agent_start", async (event, ctx) => {
@@ -1150,7 +1203,12 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
             deferredSection = `\n\n${buildDeferredToolsSection(stillDeferred)}`;
           }
         }
-        const systemPrompt = `${event.systemPrompt}\n\n${ideSection}${memorySection}${planSection}${loopSection}${deferredSection}${engineeringInstructions(projectCommands, currentAccess)}${tasteSection}`;
+        // Ground-truth session facts (cwd, date, platform, structure, git
+        // state) so git-adjacent answers do not start with a probing round.
+        const envSection = envContext
+          ? `\n\n${renderEnvironmentContext(envContext)}`
+          : "";
+        const systemPrompt = `${event.systemPrompt}\n\n${ideSection}${memorySection}${planSection}${loopSection}${deferredSection}${envSection}${engineeringInstructions(projectCommands, currentAccess)}${tasteSection}`;
         if (permission !== "plan") return { systemPrompt };
         return {
           systemPrompt,
@@ -1767,6 +1825,12 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
 
       const fireDueSchedules = async (): Promise<void> => {
         if (!schedulerCtx || schedulerCtx.mode !== "tui") return;
+        if (!ownsScheduling()) {
+          // Another live instance drives schedules for this project.
+          scheduleJobs = scheduleJobs.filter((job) => job.oneShot);
+          armSchedulerTimer();
+          return;
+        }
         const now = Date.now();
         const { due, future } = splitDue(scheduleJobs, now);
         if (due.length === 0) {
@@ -2425,6 +2489,11 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
                   : permission === "full"
                     ? "bypassed in this run (--permission full)"
                     : "on (credential-file reads require approval)"
+              }`,
+              `instance lock: ${
+                ownsScheduling()
+                  ? "held by this instance (schedules/wakeups active)"
+                  : `deferred to pid ${instanceLockLost?.pid ?? "?"} (auto-resumes when it exits)`
               }`,
               `workspace trusted: ${ctx.isProjectTrusted() ? "yes" : "no"}`,
               `session: ${ctx.sessionManager.getSessionFile() ?? "memory only"}`,

@@ -61,6 +61,8 @@
 | 51 | sleep 工具（不占 shell 进程的等待 + 单次上限自解释 + until 墙钟） | `sleep.ts` | 19 |
 | 52 | PowerShell 退出码规范化包装器（host 路径） | `shell.ts` `buildPowerShellExitWrapper` | 19 |
 | 53 | write_stdin wait_for（等输出/等退出，事件驱动而非盲等窗口） | `managed-process.ts` `waitFor` | 19 |
+| 54 | 环境上下文注入（dir/date/platform/结构/git 事实，会话级收集） | `env-context.ts` | 20 |
+| 55 | 实例锁（wx 原子 + PID 存活窃取 + 丢失监视 → 调度让位） | `instance-lock.ts` | 20 |
 
 ## 关键设计对照
 
@@ -353,6 +355,34 @@
 在并发 worker 下会被 pwsh/node 冷启动击穿），时序上界断言使用相对等待
 预算的比值而非绝对墙。
 
+### 批次 20 设计要点（2026-10-15）
+
+- **环境上下文注入**（`env-context.ts`，20c）：`session_start` 收集一次
+  会话事实——工作目录、日期、平台/架构、顶层目录结构（目录优先、各自
+  排序、上限 30、排除 .git），git 仓库再加当前分支、主分支、porcelain
+  状态（50 行截断）、最近 3 条提交——`before_agent_start` 注入
+  `# Environment` 节。git 全部走 `gitSafeArgs`/`gitSafeEnv`（批次 15），
+  每条 10s 超时、40KB 输出上限、404 式 best-effort（非 git 目录如实报告
+  而非编造）。主分支解析：`origin/HEAD` 符号引用优先（`--short` 的
+  `origin/x` 与裸 `x` 两种形态都接受——实测 `refs/remotes/origin/HEAD`
+  指向本地分支时输出无 `origin/` 前缀），兜底 main/master 存在性检查。
+  价值：git 相邻问题不再以一轮状态探查开局。
+- **实例锁**（`instance-lock.ts`，20a）：同一项目第二个 DSCode 实例会把
+  自主面（调度注入、goal loop 重启恢复、self-wakeup、monitor ping）
+  让位给持锁实例。锁文件 `.dscode/instance.lock` 存持有者 PID；获取用
+  `wx` 原子独占（跨平台）；冲突时检测持有者存活（`kill(pid,0)`，
+  EPERM 视为存活——Windows 语义），死持有者的锁 3 次重试内窃取；
+  轮询监视（5s，`fs.watch` 不作为唯一手段）发现锁被另一个**活**进程
+  持有即让位并在锁释放后自动接管。边界刻意收窄：**只 gate 定时器驱动
+  的注入**，不 gate 用户正在交互的会话里的 goal loop 仲裁续跑——锁防的
+  是两个无人值守驱动器重复注入，不是打断用户正在用的终端。shutdown
+  只释放自己的锁；`/doctor` 显示锁状态。
+- **修正第三轮判断**：代理支持不是缺口——pi-ai 内置
+  `resolveHttpProxyUrlForTarget`（读 HTTPS_PROXY/HTTP_PROXY，SOCKS/PAC
+  显式不支持并给出指引），API 模块内部已引用，DSCode 零成本获得。
+  自定义命令模板高级语法（`$1`/`${1:3}`/`${@:-default}`）属 pi 上游
+  能力，不在扩展层移植。
+
 ## 已知限制
 
 - lane 模型克隆会话模型的 `contextWindow`（1M）；flash 档真实窗口更小，
@@ -419,3 +449,6 @@
 `.envrc` 刻意不匹配边界/flag=value 值侧/shell 逐 token/MCP 浅扫，18 用例）。
 `test/batch19.test.ts`（批次 19：until 解析/钳制/结果文案/sleep 注册/拦截文案/
 **真实 pwsh 退出码传播**/waitFor 四结局/outputSize 非破坏性，20 用例）。
+`test/batch20.test.ts`（批次 20：真实 git 仓库收集/脏树/主分支两种形态/
+50 行截断/结构排序/渲染含干净树与非 git 分支/锁的获取·拒绝·窃取·损坏容忍·
+自释放·接管监视，16 用例）。
