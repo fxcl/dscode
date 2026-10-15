@@ -1,5 +1,6 @@
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
@@ -7,9 +8,13 @@ import { getDSCodeAgentDir } from "./auth.js";
 import { renderToolCall } from "./tool-ui.js";
 
 /**
- * On-demand product knowledge: bundled skill/reference documents are NOT put
- * into the system prompt — the model asks for a topic and reads the document
+ * On-demand product knowledge: bundled reference documents are NOT put into
+ * the system prompt — the model asks for a topic and reads the document
  * itself. Keeps the static prompt small while keeping the knowledge reachable.
+ *
+ * Roots: user-installed skills under the agent dir, plus the product reference
+ * docs shipped in the package (packages/core/docs - permissions, providers,
+ * headless recipes, and friends).
  */
 
 const KNOWLEDGE_READ_CAP_CHARS = 24_000;
@@ -25,8 +30,13 @@ export interface KnowledgeFile {
   sizeBytes: number;
 }
 
+/** Product reference docs shipped alongside the compiled core. */
+export function packagedDocsRoot(): string {
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "docs");
+}
+
 function knowledgeRoots(agentDir: string): string[] {
-  return [path.join(agentDir, "skills")];
+  return [path.join(agentDir, "skills"), packagedDocsRoot()];
 }
 
 function extractTitle(content: string): string {

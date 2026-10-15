@@ -89,6 +89,7 @@ import {
   type FallbackSelection,
 } from "./fallback.js";
 import { registerHooks } from "./hooks.js";
+import { connectIdeBridge, type IdeBridgeClient } from "./ide-bridge.js";
 import { registerLocalImageInput } from "./image-input.js";
 import { partitionSessionFile } from "./home.js";
 import { ManagedProcessRegistry, type ManagedProcessResult } from "./managed-process.js";
@@ -117,6 +118,7 @@ import {
   sandboxDescription,
   sandboxUnavailableGuidance,
 } from "./sandbox.js";
+import { formatRepairs, repairToolInput } from "./tool-repair.js";
 import { registerSessionCommands } from "./session-commands.js";
 import { registerServiceTierControls } from "./service-tier.js";
 import { formatStatusReport, summarizeSessionUsage } from "./status.js";
@@ -135,6 +137,10 @@ import {
   setTasteEnabled,
   tasteFileFor,
 } from "./taste.js";
+import {
+  generateSessionTitle,
+  openingExchange,
+} from "./titling.js";
 import {
   GOAL_LOOP_ENTRY,
   advanceGoalLoop,
@@ -259,9 +265,13 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
       // Stop-hook continuation decisions, written by the hooks module.
       const hookDecisions: { stopContinuation?: string | undefined } = {};
       // Fallback chain: quota-type provider failures switch to the configured
-      // fallback model once and replay the input (one-way, so no loops).
+      // fallback model and replay the input (one-way, so no loops).
       let fallbackSelection: FallbackSelection | undefined;
       let lastUserInput = "";
+      // Session auto-titling: one attempt per session.
+      let titledSession = false;
+      // IDE bridge: present when a running editor hosts the bridge socket.
+      let ideClient: IdeBridgeClient | undefined;
       const access = new SessionAccessController(options.sandbox, options.network);
       const effectiveAccess = (): EffectiveAccess => access.effective(permission);
 
@@ -306,6 +316,40 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
       registerAlphaTools(pi);
       registerHuggingFaceTools(pi);
       registerKnowledgeTool(pi);
+      pi.registerTool({
+        name: "get_diagnostics",
+        label: "Editor diagnostics",
+        description:
+          "Read language-server diagnostics (errors, warnings) from the connected editor. " +
+          "Only available when DSCode is attached to a running editor via the IDE bridge; otherwise returns a note.",
+        promptSnippet: "get_diagnostics: read editor LSP diagnostics instead of re-running compilers",
+        promptGuidelines: [
+          "Prefer this over re-running a build when an editor is attached - it is the live LSP state.",
+        ],
+        parameters: Type.Object({
+          files: Type.Optional(
+            Type.Array(Type.String(), { description: "Optional workspace-relative paths to scope the query." }),
+          ),
+        }),
+        renderShell: "self" as const,
+        executionMode: "sequential",
+        async execute(_id, params) {
+          if (!ideClient) {
+            return {
+              content: [{ type: "text", text: "No editor bridge is attached (plain terminal session). Run DSCode from a terminal inside the editor, with the DSCode extension active." }],
+              details: { available: false },
+            };
+          }
+          const payload = await ideClient.getDiagnostics(params.files);
+          return {
+            content: [{ type: "text", text: JSON.stringify(payload, null, 2).slice(0, 20_000) }],
+            details: { available: true },
+          };
+        },
+        renderCall(args, theme, context) {
+          return renderToolCall("Diagnostics", Array.isArray(args.files) ? args.files.join(", ") : "workspace", theme, context);
+        },
+      });
       registerScheduleTools(pi, () => armSchedulerTimer());
       registerWebSearchCommand(pi);
       // Always register the web_search tool so the agent always sees it.
@@ -421,6 +465,14 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
         budgetExceeded = budgetCap !== undefined && budgetLedger.cost >= budgetCap;
         fallbackSelection = loadFallbackSelection();
         lastUserInput = "";
+        titledSession = false;
+        // IDE bridge: a running editor that hosts the socket lets DSCode pull
+        // live editor context and LSP diagnostics. Discovery is quick and
+        // optional - absence is the normal case for plain terminals.
+        ideClient = await connectIdeBridge(ctx.cwd).catch(() => undefined);
+        if (ideClient) {
+          ctx.ui.notify("IDE bridge connected — editor context and diagnostics available.", "info");
+        }
         updateStatus(ctx);
         ctx.ui.setHiddenThinkingLabel(
           formatThinkingLabel(ctx.model?.name ?? ctx.model?.id ?? options.modelId),
@@ -553,8 +605,7 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
         // Budget accounting: fold this session's cost delta into the monthly
         // ledger, emit once-per-month threshold warnings, and arm the hard
         // stop once the cap is exceeded.
-        if (budgetLedger) {
-          const sessionCost = summarizeSessionUsage(ctx.sessionManager.getEntries()).cost;
+        if (budgetLedger) {          const sessionCost = summarizeSessionUsage(ctx.sessionManager.getEntries()).cost;
           const delta = sessionCost - lastRecordedSessionCost;
           if (delta > 0) {
             const recorded = recordBudgetProgress(budgetLedger, budgetCap, delta);
@@ -575,6 +626,30 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
         }
 
         if (learningInFlight || !ctx.model || ctx.mode === "json" || ctx.mode === "print") return;
+        // Session auto-titling: once per session, after the first exchange,
+        // name the session from its opening exchange on the learning lane.
+        // A user-chosen name always wins; one attempt total.
+        if (!titledSession && !pi.getSessionName()) {
+          titledSession = true;
+          try {
+            const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
+            if (auth.ok) {
+              const lane = buildLaneModels(ctx.model, { apiKey: auth.apiKey, headers: auth.headers });
+              const exchange = openingExchange(ctx.sessionManager.getBranch());
+              if (lane && exchange) {
+                const title = await generateSessionTitle({
+                  models: lane.models,
+                  model: lane.model,
+                  exchange,
+                  ...(ctx.signal ? { signal: ctx.signal } : {}),
+                });
+                if (title) pi.setSessionName(title);
+              }
+            }
+          } catch {
+            // Titling is cosmetic; never disturb the session.
+          }
+        }
         try {
           if (!(await isTasteEnabled(ctx.cwd))) return;
           const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
@@ -637,6 +712,31 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
         const memorySection = memory
           ? ["", "# Memory files", "", "The following instructions come from AGENTS.md-style memory files.", "Honor them as standing project context.", "", memory].join("\n")
           : "";
+        // IDE context: what the user is looking at right now, when an editor
+        // hosts the bridge. Failure is normal (plain terminal) and silent.
+        let ideSection = "";
+        if (ideClient) {
+          try {
+            const snapshot = await ideClient.getContext(4_000);
+            const active = snapshot.activeFile;
+            const selection = snapshot.selection;
+            const lines: string[] = [];
+            if (active?.relativePath) {
+              lines.push(`active file: ${active.relativePath}${active.cursor ? ` (line ${active.cursor.line}, col ${active.cursor.column})` : ""}`);
+            }
+            if (selection?.text?.trim()) {
+              lines.push(`selection (lines ${selection.startLine ?? "?"}-${selection.endLine ?? "?"}):`, "```", selection.text.slice(0, 2_000), "```");
+            }
+            if (snapshot.openFiles?.length) {
+              lines.push(`open files: ${snapshot.openFiles.map((file) => file.relativePath).filter(Boolean).slice(0, 12).join(", ")}`);
+            }
+            if (lines.length > 0) {
+              ideSection = ["", "# Editor context", "", "What the user currently has open in their editor:", "", ...lines, ""].join("\n");
+            }
+          } catch {
+            // Bridge went away mid-session; continue without it.
+          }
+        }
         const taste = (await isTasteEnabled(ctx.cwd))
           ? await readTasteFile(ctx.cwd)
           : undefined;
@@ -652,7 +752,7 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
               taste,
             ].join("\n")
           : "";
-        const systemPrompt = `${event.systemPrompt}\n\n${memorySection}${engineeringInstructions(projectCommands, currentAccess)}${tasteSection}`;
+        const systemPrompt = `${event.systemPrompt}\n\n${ideSection}${memorySection}${engineeringInstructions(projectCommands, currentAccess)}${tasteSection}`;
         if (permission !== "plan") return { systemPrompt };
         return {
           systemPrompt,
@@ -672,6 +772,12 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
       });
 
       pi.on("tool_call", async (event, ctx) => {
+        // Input repair first: rename aliased fields and coerce types in place
+        // so the call proceeds instead of failing on schema validation.
+        const repairs = repairToolInput(event.toolName, event.input);
+        if (repairs.length > 0) {
+          ctx.ui.notify(formatRepairs(event.toolName, repairs), "info");
+        }
         if (
           event.toolName === "bash" ||
           event.toolName === "run_command" ||

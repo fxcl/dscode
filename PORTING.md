@@ -35,6 +35,11 @@
 | 25 | 记忆 @import 体系（用户层 + @import + @提及激活嵌套记忆） | `memory.ts` | 11 |
 | 26 | /rewind 三模式（回合 checkpoint + 对话/文件独立恢复） | `rewind.ts` + `/rewind` | 11 |
 | 27 | 孤儿 tool_use 修复（打断/回滚后合成工具结果） | `context-prune.ts` | 11 |
+| 28 | 会话自动命名（首轮后 lane 生成短标题，一次性） | `titling.ts` | 13 |
+| 29 | 上下文指示器（90% 上限 + 剩余空间提示） | `status.ts` | 13 |
+| 30 | 工具输入修复管线（别名表 + 类型矫正 + 未知字段清除） | `tool-repair.ts` | 13 |
+| 31 | IDE 反向桥（编辑器开 socket，CLI 发现并取上下文/诊断） | `ide-bridge.ts` + editors/vscode | 13 |
+| 32 | 知识工具产品文档（13 篇原创参考，随包分发） | `packages/core/docs` | 13 |
 
 ## 关键设计对照
 
@@ -108,6 +113,29 @@
   toolResult（打断/回滚造成），在其后合成 `"No result — the tool call did
   not complete (interrupted or lost)."` 结果，避免严格 provider 拒收
   无结果调用；不动会话存储。
+- **会话自动命名**：首个回合结算后（TUI/会话有模型时），取首轮用户/助手
+  消息各前 1000 字符喂 learning lane，生成 1–3 词 Title Case 标题；每会话
+  仅尝试一次，已有名称或用户改名时跳过。标题经 `pi.setSessionName` 落
+  会话，进入恢复选择器。
+- **上下文指示器**：窗口的 90% 视为实际天花板（auto-compact 触发点），
+  `/status` 在剩余空间 ≤20% 时显示 `auto-compact headroom ~N%` 提示。
+- **工具输入修复**：`tool_call` 阶段对已知工具的原始输入按固定梯子修复
+  ——空值删除、别名改名（per-tool 别名表：`command`→`cmd`、`pid`→
+  `process_id`、`patch`→`input` 等）、数字/布尔字符串矫正、markdown 链接
+  解包、未声明字段清除；每次修复都以通知可见。
+- **IDE 反向桥**：编辑器扩展（editors/vscode）在
+  `\\.\pipe\dscode-<ide>-<8hex>`（Windows 命名管道）或
+  `~/.dscode/ide/*.sock`（UDS）开服务并原子写发现文件
+  （socketPath/workspaceFolders/pid/ideName）。CLI 会话启动时扫描发现
+  文件（PID 存活 + socket 形态校验 + 死条目清理 + 工作区前缀最长匹配），
+  命中后：每回合注入 `<editor context>`（活动文件/光标/选区≤2000 字符/
+  打开文件），并注册 `get_diagnostics` 工具读取编辑器 LSP（5s 超时，
+  256 文件/1000 条上限）。协议为换行 JSON，两动作
+  `getContext`/`getDiagnostics`。
+- **知识工具产品文档**：`dscode_knowledge` 根目录新增随包分发的
+  `packages/core/docs/`（13 篇原创参考：overview/permissions/sandbox/
+  providers/headless/mcp/memory/sessions/tools/skills-authoring/hooks/
+  automations + index），全部按 dscode 实际行为撰写。
 
 ## 与 command-code 的有意差异
 
@@ -163,4 +191,6 @@
 `test/batch8.test.ts`（批次 8：双档裁剪/图片处理/预算/goal loop/stop 续跑，23 用例）、
 `test/batch9.test.ts`（批次 9：错误分类/备用选择/保险库，10 用例）、
 `test/batch10.test.ts`（批次 10：代码采样/学习回滚/Cursor 提取/次级提示，12 用例）、
-`test/batch11.test.ts`（批次 11：@import 展开/深度上限/分层加载/孤儿修复/回滚点选择，11 用例）。
+`test/batch11.test.ts`（批次 11：@import 展开/深度上限/分层加载/孤儿修复/回滚点选择，11 用例）、
+`test/batch12.test.ts`（沙箱自适应后端，5 用例）、
+`test/batch13.test.ts`（批次 12-14：自动命名/输入修复/指示器/桥发现/知识文档，13 用例）。
