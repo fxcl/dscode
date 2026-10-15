@@ -43,3 +43,6 @@ omp-gui/
 *.swp
 *.swo
 /outputs
+
+# PowerShell module-analysis cache dropped by sandbox builds
+Microsoft/
