@@ -1,3 +1,5 @@
+import { guardFetchUrl } from "./ssrf-guard.js";
+
 export interface ArXivResult {
   id: string;
   title: string;
@@ -56,7 +58,9 @@ function readAttribute(attrs: string, name: string): string | undefined {
 
 export async function searchArXiv(query: string, limit: number = 10): Promise<ArXivResult[]> {
   const url = `http://export.arxiv.org/api/query?search_query=all:${encodeURIComponent(query)}&start=0&max_results=${limit}`;
-  const response = await fetch(url);
+  const guardedArxiv = guardFetchUrl(url);
+  if (!guardedArxiv.ok) throw new Error(guardedArxiv.error);
+  const response = await fetch(guardedArxiv.url);
   if (!response.ok) {
     throw new Error(`Failed to fetch from arXiv API: ${response.statusText}`);
   }
@@ -127,7 +131,9 @@ export async function searchArXiv(query: string, limit: number = 10): Promise<Ar
 
 export async function searchHuggingFaceModels(query: string, limit: number = 10): Promise<HuggingFaceModelResult[]> {
   const url = `https://huggingface.co/api/models?search=${encodeURIComponent(query)}&limit=${limit}`;
-  const response = await fetch(url);
+  const guardedHf = guardFetchUrl(url);
+  if (!guardedHf.ok) throw new Error(guardedHf.error);
+  const response = await fetch(guardedHf.url);
   if (!response.ok) {
     throw new Error(`Failed to fetch from HuggingFace API: ${response.statusText}`);
   }

@@ -128,7 +128,9 @@ function run(command, args, cwd, extraEnv = {}) {
     env: { ...process.env, ...extraEnv },
     encoding: "utf8",
     maxBuffer: 16 * 1024 * 1024,
-    timeout: 120_000,
+    // A cold npm cache install can exceed the default budget; keep 120s as
+    // the default but let slow environments raise it via env without edits.
+    timeout: Number(process.env.DSCODE_SMOKE_TIMEOUT_MS ?? 120_000),
     stdio: ["ignore", "pipe", "pipe"],
   });
 }

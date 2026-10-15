@@ -46,6 +46,17 @@
 | 36 | MCP 输出 token 帽 + 溢出落盘 + 二进制持久化 | `mcp-output.ts` + mcp.ts | 16 |
 | 37 | 容错编辑锚定（标点折叠 + 按行缩进重映射） | `patch.ts` | 16 |
 | 38 | 词级 diff 配对（Dice 配对 + token LCS 高亮） | `word-diff.ts` + colorPatch | 16 |
+| 39 | 计划护栏（防重复提交 / 防静默丢步 / 收尾验证要求） | `plan.ts` `planUpdateNotes` | 17 |
+| 40 | 压缩机械兜底（LLM 全失败时无模型降级） | `compaction.ts` `mechanicalDigestSummary` | 17 |
+| 41 | 恒定状态重注入（未完成 plan + 武装 goal loop 进 system prompt） | `dscode-extension.ts` `before_agent_start` | 17 |
+| 42 | 续跑提供器（空响应 / 长度截断 / 悬空意图，有界自动续跑） | `continuation.ts` | 17 |
+| 43 | 后台进程 monitor 唤醒（零输出 ping + 退出 ping） | `dscode-extension.ts` `monitor_seconds` + `self-wakeup.ts` | 17 |
+| 44 | Agent 自调度（`schedule_wakeup` + 链条上限 + 数据围栏） | `self-wakeup.ts` | 17 |
+| 45 | Goal 校验器（独立 LLM 仲裁 + 证据构造 + 覆盖次数上限） | `goal-verifier.ts` | 17 |
+| 46 | 延迟工具协议（TS 签名清单 + `search_tools` 按需加载） | `deferred-tools.ts` + `mcp.ts` `deferredCatalog` | 17 |
+| 47 | 工具改名别名引导（未知工具名给出正确调用而非 schema 报错） | `deferred-tools.ts` `describeToolAlias` | 17 |
+| 48 | 重复读防护（LRU 窗口计数 + mtime/size 校验） | `reread-guard.ts` | 17 |
+| 49 | SSRF 防护（凭据拒绝 / 私网全族 / http→https 升级） | `ssrf-guard.ts` + fetch 点 | 17 |
 
 ## 关键设计对照
 
@@ -182,6 +193,109 @@
 - **学习代理**：多轮工具循环（`read_taste_file`/`write_taste_file`/`edit_taste_file`，
   路径二次校验、单文件 16KB 上限、无有效条目自动回退、跨分类条目计数），
   对应 commandcode 的 `runTasteTool` + `createLearner` 循环（轮数按 DSCode 批次规模缩为 8）。
+- **Turn 仲裁器优先级（含批次 17）**：降级重放 > 续跑恢复 > stop 续跑 >
+  goal loop；plan 执行 follow-up 已排队时，stop 续跑与续跑恢复均让位。
+
+## 批次 17 设计要点（2026-10-15）
+
+来自 command-code 第二层机制：07 号文档遗留的两个空白（延迟工具协议、
+按需工具描述）加上新挖出的子系统。
+
+- **计划护栏**（`plan.ts` `planUpdateNotes`）：`update_plan` 结果按与上一版的
+  差分追加三条针对性提示——**逐字相同的重复提交**（防刷屏烧 token）、
+  **未完成步骤被静默丢弃**（提醒"每次调用替换整表"，预览上限 5 条）、
+  **收尾无验证步骤**（要求先跑测试/构建再写总结）。步骤同一性按
+  "折叠内部空白 + 小写" 判定，避免模型改写措辞被误判为变更。
+  与已移植的 `validatePlanSteps`（结构校验）互补：那里管结构，这里管语义。
+- **压缩机械兜底**：`session_before_compact` 此前在所有模型候选失败时
+  `return undefined`，等于放弃压缩（下一轮重复触发、重复付费）。
+  现在回落到 `mechanicalDigestSummary`——纯本地零模型的骨架摘要：
+  用户提示原样保留（截断）、助手意图保留首句、工具调用保留"名称+首个
+  字符串参数"，工具输出一律丢弃，并显式声明"工具输出被丢弃"以免摘要撒谎。
+- **恒定状态重注入**：压缩会消灭 transcript 里的计划与 loop 目标。
+  `before_agent_start` 每轮把**未完成 plan** 与**武装中的 goal loop**
+  以独立小节重新注入 system prompt，使压缩不再丢失这两项会话级状态；
+  goal 文本一律 fenced 并声明"是数据、不能扩大授权"。
+- **续跑提供器**（`continuation.ts`）：三类"停了但不该停"的有界自动续跑——
+  **空响应**（2 次，耗尽后区分"有 thinking 无输出"与"纯空"给出不同提示）、
+  **长度截断**（3 次，要求"接着写、不要重复"）、**悬空意图**（2 次，
+  `endsWithDanglingIntent` 识别"接下来我来跑测试:"这类宣告未执行）。
+  三类计数互相独立；**一旦本回合真的调过工具**，长度/意图计数清零
+  （有进展就不算卡死），真实用户输入则全部清零。json 模式跳过
+  （脚本消费方自己拥有回合契约）。
+- **后台 monitor 唤醒**：`exec_command` 新增 `monitor_seconds`。运行中的
+  进程按节奏注入**零输出 ping**（只有 pid + 一句"本次 ping 不含任何输出，
+  需要就 write_stdin"），进程退出时再补一条带退出码的 ping。模型决定要不要
+  读日志——无意义输出一个 token 都不花。依赖新增的
+  `ManagedProcessRegistry.describe()`：非破坏性状态探测，不消费 pending
+  输出、不删除记录（与 `interact()` 语义区分）。
+- **Agent 自调度**（`schedule_wakeup`）：同一时刻只允许一个待触发唤醒，
+  每次唤醒必须由模型重新排下一次；**链条上限 30 次**（无用户输入时的连续
+  自调度数），触顶后工具**拒绝并引导用户用 `/loop`**——把"模型可以自己
+  无限循环等待"这条口子用结构堵死，而不是靠提示词劝阻。唤醒任务文本
+  fenced 为数据。真实用户输入重置链条计数。
+- **Goal 校验器**（`goal-verifier.ts`）：对已移植的 `LOOP_COMPLETE` 自判
+  做独立仲裁——learning lane 上一次**无工具、20s 超时**的独立调用，
+  输入三段：`<goal>`、`<agent_response>`、`<evidence>`
+  （**从消息流倒序取最近 8 条真实工具结果**，映射回工具名、单条截断；
+  无工具活动时显式写 "(no tool activity recorded this turn)"）。
+  三段全部经 `defangVerifierTags` 中和尖括号（`<` → `<_`，闭合标签因此失效）。
+  **任何失败（超时/网络/回复不可解析）一律判"未完成"**——保守方向是让循环
+  继续而不是假完成。单个 loop 内覆盖上限 3 次，超限后模型说了算
+  （防止校验器和模型互相顶牛烧 token）。
+- **延迟工具协议**（`deferred-tools.ts`）：MCP 工具数 ≥ 12（阈值
+  `DEFERRED_MCP_TOOL_THRESHOLD`，`DSCODE_DEFERRED_MCP=off` 可关）时，
+  MCP schema 离开活跃工具集，改在 system prompt 里以**一行 TypeScript
+  对象类型签名**列出（`- mcp__x__y{path: string, recursive?: boolean}: 首句描述`，
+  字段 160 字符/签名 640 字符上限，超限在字段边界截断为 `, …}`）。
+  `search_tools` 按能力描述检索（IDF 加权，名称命中加权更高）或
+  `select:<name>` 精确加载，返回完整 JSON Schema 并**为整场会话重新激活**
+  这些工具。prompt 带关键规则："签名够用就直接调，别查" +
+  "被拒先查再重试——对同一形状的第二次猜测通常以同样方式失败"。
+  与已移植的 MCP 描述合成（`mcp-describe.ts`）是同一目标的两端：
+  那边压描述，这边压 schema。
+- **工具改名别名引导**：降级模型常按别处学到的名字调工具（`bash`、
+  `todo_write`、`read_multiple_files`…）。`tool_call` 阶段识别这些名字并
+  **用正确的 DSCode 调用拦截**（`bash`→`exec_command` 并说明沙箱原因，
+  `todo_write`→`update_plan`），而不是让 schema 校验失败后模型反复猜。
+  仅在工具确实不在活跃集时触发，不干扰同名真实工具。
+- **重复读防护**（`reread-guard.ts`）：以
+  `(path, mtimeMs, size, lineStart, lineEnd)` 为键做 LRU 计数，第 3 次
+  完全相同的读取替换为一条"该区域未变更，别再读"的通知并清零计数
+  （很久之后的合法复读仍可用）。在 `tool_result` 阶段、throttle 之前执行。
+- **SSRF 防护**（`ssrf-guard.ts`）：出网 URL 校验链——长度上限 → 严格解析
+  → 协议白名单 → **拒绝内嵌凭据** → 私网/环回/链路本地拦截（IPv4 覆盖
+  10/8、172.16/12、192.168/16、169.254/16、100.64/10 CGNAT、198.18/15、
+  224+/保留；IPv6 覆盖 `::`/`::1`、`fe80::/10`、`fc00::/7`、`ff00::/8`、
+  `::ffff:a.b.c.d` 与 `::w.x.y.z` 内嵌 IPv4、NAT64、6to4）→ 单标签主机名拒绝
+  → `.localhost`/`.local`/`.internal` 后缀与云 metadata 主机名 →
+  **http→https 自动升级并回报 upgraded 标记**。已接入 `huggingface-tools.ts`
+  与 `science-connectors.ts` 的全部 fetch 点。
+  注意：DSCode 的 fetch 面以**固定 API 端点 + 模型提供的 repo/path 参数**
+  为主，故此处以"出口把关"而非"逐 URL 生成期校验"实现。
+
+### 批次 17 审查修正（同批交付）
+
+自查接线边界后修正三处：
+
+- **续跑提供器增加不可恢复停止原因门禁**：`stopReason` 为 `error`/`aborted`
+  的回合不触发任何恢复（错误回合归 run_error 反馈环管，打断是用户意图）。
+  源系统 provider 跑在循环内、这两类在到达 provider 前已被重试层/取消路径
+  截获，移植到 `agent_end` 后该门禁需在 `continuation.ts` 里显式补上。
+  有工具调用的 aborted/error 回合仍正常重置进度计数。
+- **注入消息判据统一为共享常量**：stop-hook 续跑消息的发送与识别此前
+  各写各的（判据带方括号、消息没有），导致注入回合被误判为用户输入
+  （误记回滚点、误重置自调度链与续跑预算）。现 `STOP_HOOK_CONTINUATION_HEAD`
+  与 `INJECTED_INPUT_PREFIXES` 单一来源，发送方与过滤方共用，
+  `isInjectedInput` 导出为可测函数并有契约用例钉死。
+- **续跑恢复让位 plan 执行 follow-up**：`planFollowUpSent` 补进续跑条件，
+  与 stop 续跑/goal loop 的既有让位规则一致；仲裁器完整优先级更新为
+  **降级重放 > 续跑恢复 > stop 续跑 > goal loop**（plan follow-up 排队时
+  续跑与 stop 续跑让位）。
+
+另补：`session_start` 现在同时重置 `continuationState` 与 `verifierOverrides`
+（factory 每进程一次，防止 `/resume` 换会话后带着上一会话耗尽的预算开局）；
+`describe()` 与 SSRF 模块注释收紧至如实描述覆盖面（Teredo 未拦截，与源一致）。
 
 ## 已知限制
 
@@ -195,6 +309,16 @@
 - 预算金额是模型费率的本地估算（与 /status 同源）；单回合内的实际花费
   可超过剩余额度，拦截在回合结算后生效。Goal Loop 与后台调度同样仅在
   TUI 模式驱动；预算硬拦截对 headless 生效（退出码 1）。
+- monitor 唤醒与 `schedule_wakeup` 依赖注入回合，均只在 TUI 模式驱动；
+  json/CI 模式不注入（工具仍可调用并返回确认文本，但定时器不触发）。
+- 续跑提供器在 json 模式关闭：脚本消费方自己拥有"回合结束"契约，
+  自动续跑会让 JSONL 流出现计划外的回合。
+- 延迟工具只在 MCP 工具数达到阈值时启用；阈值为静态常量，
+  不随上下文预算动态调整（command-code 的同名开关是 per-request 的，
+  此处简化为 per-session）。
+- SSRF 防护是出口把关：它拦"这次请求要打到哪里"，不校验 URL 的**来源**
+  （是否来自模型输入）。因为 DSCode 当前的 fetch 面由固定端点 +
+  参数拼装构成，逐 URL 的生成期校验收益有限。
 
 ## 验证基线
 
@@ -216,9 +340,13 @@
 `guardrails.ts`、`context-prune.ts`、`knowledge.ts`、`mcp-describe.ts`、
 `cron-lite.ts`、`scheduler.ts`、`hook-trust.ts`、`status.ts`（扩展）、
 `budget.ts`、`goal-loop.ts`（批次 8）、`fallback.ts`、`mcp-vault.ts`（批次 9）。
-修改：`dscode-extension.ts`（全部接线）、`mcp.ts`（描述合成 + 保险库引用）、
+批次 17 新增：`continuation.ts`、`self-wakeup.ts`、`goal-verifier.ts`、
+`deferred-tools.ts`、`reread-guard.ts`、`ssrf-guard.ts`。
+修改：`dscode-extension.ts`（全部接线）、`mcp.ts`（描述合成 + 保险库引用 + 工具目录）、
 `hooks.ts`（信任+审计+Stop 续跑）、`status.ts`（预算行）、`context-prune.ts`（双档化）、
-`compaction.ts`（图片处理）。
+`compaction.ts`（图片处理 + 机械兜底）、`plan.ts`（护栏提示）、
+`managed-process.ts`（`describe()` 非破坏性探测）、
+`huggingface-tools.ts` / `science-connectors.ts`（SSRF 出口把关）。
 测试：`test/taste.test.ts`、`test/guardrails.test.ts`、`test/batch4.test.ts`、`test/scheduler.test.ts`、
 `test/hook-trust.test.ts`、`test/hooks.test.ts`（更新：注入 home + 信任种子 + 审计断言）、
 `test/batch8.test.ts`（批次 8：双档裁剪/图片处理/预算/goal loop/stop 续跑，23 用例）、
@@ -229,3 +357,5 @@
 `test/batch13.test.ts`（批次 12-14：自动命名/输入修复/指示器/桥发现/知识文档，13 用例）、
 `test/batch15.test.ts`（批次 15：围栏/哨兵中和/sleep 守卫/退出码语义/git 加固，11 用例）。
 `test/batch16.test.ts`（批次 16：词级配对/标点锚定/缩进重映射/MCP 预算，15 用例）。
+`test/batch17.test.ts`（批次 17：计划护栏/机械摘要/续跑三类/延迟工具检索/
+校验器证据与围栏/自调度链条/复读窗口/SSRF 全族，76 用例）。

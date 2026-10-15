@@ -2,7 +2,7 @@
   "name": "dscode-vscode",
   "displayName": "DSCode",
   "description": "DeepSeek V4 Flash coding agent for local VS Code workspaces.",
-  "version": "0.3.5",
+  "version": "0.4.0",
   "publisher": "dscode",
   "license": "MIT",
   "files": [

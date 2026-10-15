@@ -13,6 +13,7 @@ import { loadVault, resolveVaultReferences, type VaultFile } from "./mcp-vault.j
 import { stripModelCredentialEnvironment } from "./providers.js";
 import { buildLaneModels } from "./lanes.js";
 import { synthesizeToolDescriptions, type SynthesisTarget } from "./mcp-describe.js";
+import type { DeferredToolEntry } from "./deferred-tools.js";
 
 const stdioServerSchema = z.object({
   command: z.string().min(1),
@@ -40,6 +41,7 @@ interface ConnectedServer {
 
 export class MCPManager {
   private readonly servers: ConnectedServer[] = [];
+  private readonly catalog = new Map<string, DeferredToolEntry>();
   private errors: string[] = [];
 
   async connectConfigured(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
@@ -73,6 +75,11 @@ export class MCPManager {
     return this.servers.flatMap((server) => server.tools);
   }
 
+  /** Registered MCP tools with their full schemas, for deferred loading. */
+  deferredCatalog(): DeferredToolEntry[] {
+    return [...this.catalog.values()];
+  }
+
   serverCount(): number {
     return this.servers.length;
   }
@@ -80,6 +87,7 @@ export class MCPManager {
   async close(): Promise<void> {
     await Promise.allSettled(this.servers.map((server) => server.close()));
     this.servers.length = 0;
+    this.catalog.clear();
   }
 
   private async connectServer(
@@ -164,6 +172,14 @@ export class MCPManager {
         registered.push(localName);
         const rawDescription = tool.description ?? `Call MCP tool ${tool.name} on ${serverName}`;
         const description = synthesizedDescriptions?.get(tool.name) ?? rawDescription;
+        this.catalog.set(localName, {
+          name: localName,
+          description,
+          inputSchema:
+            typeof tool.inputSchema === "object" && tool.inputSchema !== null
+              ? (tool.inputSchema as Record<string, unknown>)
+              : undefined,
+        });
         pi.registerTool({
           name: localName,
           label: `${serverName}: ${tool.title ?? tool.name}`,

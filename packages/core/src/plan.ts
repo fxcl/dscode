@@ -57,21 +57,25 @@ export function registerPlanTool(
           isError: true,
         };
       }
+      const previous = getPlan();
       const explanation = params.explanation?.trim();
       const plan: PlanState = {
         ...(explanation ? { explanation } : {}),
         steps: params.plan.map((item) => ({ step: item.step.trim(), status: item.status })),
-        revision: (getPlan()?.revision ?? 0) + 1,
+        revision: (previous?.revision ?? 0) + 1,
         updatedAt: new Date().toISOString(),
       };
       pi.appendEntry(PLAN_STATE_ENTRY, plan);
       onUpdate(plan, ctx);
       const completed = plan.steps.filter((step) => step.status === "completed").length;
+      const notes = planUpdateNotes(previous, plan);
       return {
         content: [
           {
             type: "text" as const,
-            text: `Plan updated: ${completed}/${plan.steps.length} steps completed.`,
+            text: notes.length > 0
+              ? `Plan updated: ${completed}/${plan.steps.length} steps completed.\n\n${notes.join("\n\n")}`
+              : `Plan updated: ${completed}/${plan.steps.length} steps completed.`,
           },
         ],
         details: plan,
@@ -142,6 +146,66 @@ export function validatePlanSteps(steps: PlanStep[]): string | undefined {
     return "A plan can have at most one in_progress step.";
   }
   return undefined;
+}
+
+const VERIFICATION_STEP_PATTERN = /\b(test|tests|verify|verification|validat|check|build|lint|smoke|e2e)\b/i;
+const DROPPED_STEPS_PREVIEW = 5;
+
+/**
+ * Guardrail notes appended to an update_plan result. Each targets one common
+ * plan-management failure: resubmitting an identical plan, silently dropping
+ * unfinished steps, or closing out a plan that never verified anything. All
+ * wording is original.
+ */
+export function planUpdateNotes(previous: PlanState | undefined, next: PlanState): string[] {
+  const notes: string[] = [];
+  const nextKeys = next.steps.map((step) => stepKey(step.step));
+
+  if (
+    previous &&
+    previous.steps.length === next.steps.length &&
+    previous.steps.every((step, index) => stepKey(step.step) === nextKeys[index] && step.status === next.steps[index]?.status)
+  ) {
+    notes.push(
+      "NOTE: The submitted plan is identical to the current plan. Do not call update_plan again unless a step status changes or the plan itself changes.",
+    );
+  }
+
+  if (previous) {
+    const dropped = previous.steps.filter(
+      (step) => step.status !== "completed" && !nextKeys.includes(stepKey(step.step)),
+    );
+    if (dropped.length > 0) {
+      const preview = dropped
+        .slice(0, DROPPED_STEPS_PREVIEW)
+        .map((step) => `"${oneLine(step.step)}"`)
+        .join(", ");
+      notes.push(
+        `NOTE: This update REMOVED ${dropped.length} unfinished step${dropped.length === 1 ? "" : "s"} from the previous plan (${preview}). ` +
+          "Every update_plan call replaces the ENTIRE plan. If you did not mean to drop them, call update_plan again with the complete list.",
+      );
+    }
+  }
+
+  const allCompleted =
+    next.steps.length > 0 && next.steps.every((step) => step.status === "completed");
+  if (allCompleted && !next.steps.some((step) => VERIFICATION_STEP_PATTERN.test(step.step))) {
+    notes.push(
+      "NOTE: You just closed out every step and none of them was a verification step. Before writing your final summary, verify your changes actually work (run the tests/build or exercise the change end-to-end).",
+    );
+  }
+  return notes;
+}
+
+function stepKey(step: string): string {
+  // Collapse internal whitespace and case so a reworded-but-equivalent step
+  // ("Run  the tests" / " run the tests ") is not reported as a change.
+  return step.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function oneLine(text: string): string {
+  const collapsed = text.replace(/\s+/g, " ").trim();
+  return collapsed.length > 80 ? `${collapsed.slice(0, 79)}…` : collapsed;
 }
 
 function renderPlan(

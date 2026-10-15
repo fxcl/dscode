@@ -17,6 +17,96 @@ const AUTO_COMPACT_AT = 0.9;
 const KEEP_RECENT_TOKENS = 60_000;
 const SUMMARY_RESERVE_TOKENS = 32_000;
 
+const DIGEST_LINE_CHARS = 160;
+const DIGEST_ARG_CHARS = 80;
+const DIGEST_MAX_LINES = 400;
+
+function digestOneLine(text: string, limit = DIGEST_LINE_CHARS): string {
+  const collapsed = text.replace(/\s+/g, " ").trim();
+  if (collapsed.length <= limit) return collapsed;
+  return `${collapsed.slice(0, limit - 1)}…`;
+}
+
+function digestArgs(args: unknown): string {
+  if (args === undefined || args === null) return "";
+  if (typeof args === "string") return digestOneLine(args, DIGEST_ARG_CHARS);
+  if (typeof args === "object") {
+    for (const value of Object.values(args as Record<string, unknown>)) {
+      if (typeof value === "string" && value.trim()) return digestOneLine(value, DIGEST_ARG_CHARS);
+    }
+    return "";
+  }
+  return digestOneLine(String(args), DIGEST_ARG_CHARS);
+}
+
+/**
+ * Mechanical, LLM-free compaction fallback: when the summarizer fails on every
+ * candidate model, reduce the history to its skeleton instead of leaving the
+ * context untouched. User prompts survive verbatim (trimmed), assistant turns
+ * survive as one-line intents, tool calls survive as name + first argument,
+ * and bulky tool output is dropped entirely. The transcript skeleton is enough
+ * for the model to keep its bearings; the retained recent entries (selected by
+ * the framework via firstKeptEntryId) carry the detail.
+ */
+export function mechanicalDigestSummary(messages: readonly AgentMessage[]): string {
+  const lines: string[] = [];
+  for (const message of messages) {
+    if (lines.length >= DIGEST_MAX_LINES) {
+      lines.push("…[older entries omitted]");
+      break;
+    }
+    const content = (message as { content?: unknown }).content;
+    if (message.role === "user") {
+      const text = typeof content === "string"
+        ? content
+        : Array.isArray(content)
+          ? content
+              .filter(
+                (block): block is { type: "text"; text: string } =>
+                  typeof block === "object" &&
+                  block !== null &&
+                  (block as { type?: unknown }).type === "text" &&
+                  typeof (block as { text?: unknown }).text === "string",
+              )
+              .map((block) => block.text)
+              .join(" ")
+          : "";
+      const trimmed = text.trim();
+      if (trimmed) lines.push(`- user: ${digestOneLine(trimmed)}`);
+      continue;
+    }
+    if (message.role !== "assistant" || !Array.isArray(content)) continue;
+    for (const block of content) {
+      if (lines.length >= DIGEST_MAX_LINES) break;
+      if (
+        typeof block === "object" &&
+        block !== null &&
+        (block as { type?: unknown }).type === "text" &&
+        typeof (block as { text?: unknown }).text === "string" &&
+        (block as { text: string }).text.trim()
+      ) {
+        lines.push(`- assistant: ${digestOneLine((block as { text: string }).text)}`);
+      } else if (
+        typeof block === "object" &&
+        block !== null &&
+        (block as { type?: unknown }).type === "toolCall"
+      ) {
+        const call = block as { name?: unknown; arguments?: unknown };
+        const name = typeof call.name === "string" ? call.name : "tool";
+        const args = digestArgs(call.arguments);
+        lines.push(`- assistant used ${name}(${args})`);
+      }
+    }
+  }
+  return [
+    "Mechanical fallback digest (the summarizer model was unavailable, so no prose summary was produced).",
+    "What follows is the bare skeleton of the summarized history: user requests, assistant intents, and tool usage — tool output was dropped.",
+    "",
+    ...lines,
+  ].join("\n");
+}
+
+
 /**
  * Inline notice that replaces an image block in the input handed to the
  * summarizer. Summary models on background lanes are often text-only, and the

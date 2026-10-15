@@ -191,6 +191,27 @@ export class ManagedProcessRegistry {
     }));
   }
 
+  /**
+   * Non-destructive status probe: unlike interact(), it never consumes the
+   * pending output or removes the record. Monitors use it to decide whether a
+   * wakeup ping is due. A record removed by interact() after the process
+   * finished reads as "unknown" here, and the monitor then disarms silently —
+   * by design: whoever consumed the completion already saw the exit code.
+   */
+  describe(
+    processId: string,
+  ): { processId: string; running: boolean; exitCode?: number | null; command?: string; sandbox: string } | undefined {
+    const record = this.records.get(processId);
+    if (!record) return undefined;
+    return {
+      processId,
+      running: record.running,
+      ...(record.running ? {} : { exitCode: record.exitCode }),
+      command: record.command,
+      sandbox: record.sandbox,
+    };
+  }
+
   dispose(): void {
     for (const record of this.records.values()) {
       clearTimeout(record.timeout);

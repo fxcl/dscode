@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { guardFetchUrl } from "./ssrf-guard.js";
 
 type RepoType = "model" | "dataset" | "space";
 
@@ -56,7 +57,9 @@ function authHeaders(): Record<string, string> {
 }
 
 async function fetchJson(url: string): Promise<unknown> {
-  const response = await fetch(url, { headers: authHeaders() });
+  const guarded = guardFetchUrl(url);
+  if (!guarded.ok) throw new Error(guarded.error);
+  const response = await fetch(guarded.url, { headers: authHeaders() });
   if (!response.ok) {
     throw new Error(`Hugging Face request failed: ${response.status} ${response.statusText}`);
   }
@@ -160,7 +163,9 @@ async function readRepoFile(params: {
   assertReadableHubFile(cleanPath);
   const filePath = cleanPath.split("/").map(encodeURIComponent).join("/");
   const url = `${HF_BASE}/${repoTypeResolvePrefix(params.repoType)}${encoded}/resolve/${revision}/${filePath}`;
-  const response = await fetch(url, { headers: authHeaders() });
+  const guarded = guardFetchUrl(url);
+  if (!guarded.ok) throw new Error(guarded.error);
+  const response = await fetch(guarded.url, { headers: authHeaders() });
   if (!response.ok) {
     throw new Error(`Hugging Face file read failed: ${response.status} ${response.statusText}`);
   }
