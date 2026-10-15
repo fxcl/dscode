@@ -4,6 +4,36 @@ import { BoundedOutput } from "./process.js";
 import { stripModelCredentialEnvironment } from "./providers.js";
 import { sandboxCommand, type SandboxOptions } from "./sandbox.js";
 
+/**
+ * Pids of background children still alive at process exit are hard-killed so
+ * an abrupt DSCode shutdown cannot leave orphans behind.
+ */
+const liveChildren = new Set<number>();
+let exitSweepInstalled = false;
+
+function ensureExitSweep(): void {
+  if (exitSweepInstalled) return;
+  exitSweepInstalled = true;
+  process.once("exit", () => {
+    for (const pid of liveChildren) {
+      try {
+        if (process.platform === "win32") {
+          spawn("taskkill.exe", ["/pid", String(pid), "/t", "/f"], { stdio: "ignore", windowsHide: true });
+        } else {
+          process.kill(-pid, "SIGKILL");
+        }
+      } catch {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // already gone
+        }
+      }
+    }
+    liveChildren.clear();
+  });
+}
+
 export interface ManagedProcessResult {
   processId: string;
   running: boolean;
@@ -11,11 +41,13 @@ export interface ManagedProcessResult {
   exitCode?: number | null;
   timedOut?: boolean;
   sandbox: string;
+  command?: string;
 }
 
 interface ProcessRecord {
   id: string;
   child: ChildProcessWithoutNullStreams;
+  command: string;
   output: BoundedOutput;
   pending: string;
   running: boolean;
@@ -58,6 +90,7 @@ export class ManagedProcessRegistry {
     const record: ProcessRecord = {
       id,
       child,
+      command,
       output: new BoundedOutput(80_000),
       pending: "",
       running: true,
@@ -80,10 +113,29 @@ export class ManagedProcessRegistry {
     };
     child.stdout.on("data", (chunk: Buffer) => append("", chunk));
     child.stderr.on("data", (chunk: Buffer) => append("[stderr] ", chunk));
+    if (child.pid !== undefined) {
+      ensureExitSweep();
+      liveChildren.add(child.pid);
+    }
     child.once("error", (error) => {
       append("[error] ", Buffer.from(error.message));
     });
+    // Exit-vs-stream settle race: grandchildren can hold stdout/stderr open
+    // after the shell itself exited. If "exit" fired but "close" has not
+    // within 100ms, finalize anyway so the task does not hang until timeout.
+    child.once("exit", (exitCode) => {
+      if (child.pid !== undefined) liveChildren.delete(child.pid);
+      setTimeout(() => {
+        if (!record.running) return;
+        record.running = false;
+        record.exitCode = record.exitCode ?? exitCode;
+        clearTimeout(record.timeout);
+        options.signal?.removeEventListener("abort", abort);
+        record.resolveCompletion();
+      }, 100).unref();
+    });
     child.once("close", (exitCode) => {
+      if (child.pid !== undefined) liveChildren.delete(child.pid);
       record.running = false;
       record.exitCode = exitCode;
       clearTimeout(record.timeout);
@@ -157,6 +209,7 @@ export class ManagedProcessRegistry {
       ...(!record.running ? { exitCode: record.exitCode } : {}),
       ...(record.timedOut ? { timedOut: true } : {}),
       sandbox: record.sandbox,
+      command: record.command,
     };
   }
 }

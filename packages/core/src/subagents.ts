@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { runProcess } from "./process.js";
+import { gitSafeArgs, gitSafeEnv } from "./git-safe.js";
 import type { DSCodeRuntimeOptions } from "./runtime-options.js";
 import { renderCollapsibleToolResult, renderToolCall } from "./tool-ui.js";
 
@@ -204,13 +205,15 @@ Return concise evidence, exact file paths, commands/checks, and any unresolved r
   const execution = await spawnCapture(invocation.command, args, agentCwd, env, signal);
   let diff: string | undefined;
   if (worktree) {
-    await runProcess("git", ["add", "-N", "--", "."], {
+    await runProcess("git", gitSafeArgs(["add", "-N", "--", "."]), {
       cwd: worktree,
+      envOverlay: gitSafeEnv(),
       timeoutMs: 30_000,
       maxOutputBytes: 10_000,
     });
-    const diffResult = await runProcess("git", ["diff", "--binary", "--no-ext-diff"], {
+    const diffResult = await runProcess("git", gitSafeArgs(["diff", "--binary", "--no-ext-diff"]), {
       cwd: worktree,
+      envOverlay: gitSafeEnv(),
       timeoutMs: 30_000,
       maxOutputBytes: 100_000,
     });
@@ -227,8 +230,9 @@ Return concise evidence, exact file paths, commands/checks, and any unresolved r
 }
 
 async function createWorktree(cwd: string): Promise<string> {
-  const rootResult = await runProcess("git", ["rev-parse", "--show-toplevel"], {
+  const rootResult = await runProcess("git", gitSafeArgs(["rev-parse", "--show-toplevel"]), {
     cwd,
+    envOverlay: gitSafeEnv(),
     timeoutMs: 10_000,
     maxOutputBytes: 10_000,
   });
@@ -237,8 +241,9 @@ async function createWorktree(cwd: string): Promise<string> {
   }
   const parent = await fsPromises.mkdtemp(path.join(os.tmpdir(), "dscode-worktree-"));
   const target = path.join(parent, "workspace");
-  const result = await runProcess("git", ["worktree", "add", "--detach", target, "HEAD"], {
+  const result = await runProcess("git", gitSafeArgs(["worktree", "add", "--detach", target, "HEAD"]), {
     cwd: rootResult.stdout.trim(),
+    envOverlay: gitSafeEnv(),
     timeoutMs: 60_000,
     maxOutputBytes: 30_000,
   });

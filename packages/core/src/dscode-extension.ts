@@ -27,6 +27,12 @@ import {
   type EffectiveAccess,
 } from "./access.js";
 import { classifyCommand } from "./approval.js";
+import {
+  blockedSleepMessage,
+  describeExitCode,
+  detectBlockedSleep,
+  fenceUntrustedOutput,
+} from "./command-semantics.js";
 import { brandBlue } from "./brand.js";
 import {
   capturePatchCheckpoint,
@@ -2138,6 +2144,16 @@ function registerCommandTools(
     renderShell: "self",
     executionMode: "sequential",
     async execute(_id, params, signal, _onUpdate, ctx) {
+      // Foreground-sleep guard: waiting wall-clock in the foreground wastes
+      // the command timeout; background + poll is the supported pattern.
+      const blockedSleep = detectBlockedSleep(params.cmd);
+      if (blockedSleep) {
+        return {
+          content: [{ type: "text", text: blockedSleepMessage(blockedSleep.seconds) }],
+          details: { blockedSleep: blockedSleep.seconds },
+          isError: true,
+        };
+      }
       let commandAccess = accessController.forCommand(getPermission(), params.cmd);
       if (!commandAccess.network && commandNeedsNetwork(params.cmd)) {
         commandAccess = await requestCommandAccess(
@@ -2575,12 +2591,17 @@ function colorPatch(
 }
 
 function formatManagedResult(result: ManagedProcessResult): string {
+  const semanticNote =
+    result.exitCode !== undefined && result.exitCode !== null && result.command
+      ? describeExitCode(result.command, result.exitCode)
+      : undefined;
   return [
-    result.output.trimEnd(),
+    fenceUntrustedOutput(result.output.trimEnd()),
     `process_id: ${result.processId}`,
     `status: ${result.running ? "running" : "completed"}`,
     ...(result.running ? ["Use write_stdin to poll or interact."] : []),
     ...(result.exitCode === undefined ? [] : [`exit_code: ${result.exitCode}`]),
+    ...(semanticNote ? [semanticNote] : []),
     ...(result.timedOut ? ["timed_out: true"] : []),
     `sandbox: ${result.sandbox}`,
   ].join("\n");

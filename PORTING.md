@@ -40,6 +40,9 @@
 | 30 | 工具输入修复管线（别名表 + 类型矫正 + 未知字段清除） | `tool-repair.ts` | 13 |
 | 31 | IDE 反向桥（编辑器开 socket，CLI 发现并取上下文/诊断） | `ide-bridge.ts` + editors/vscode | 13 |
 | 32 | 知识工具产品文档（13 篇原创参考，随包分发） | `packages/core/docs` | 13 |
+| 33 | 防注入输出围栏 + 前台 sleep 守卫 + 退出码语义 | `command-semantics.ts` | 15 |
+| 34 | 进程退出扫描 + exit-grace 结算（孙进程占管道防挂） | `managed-process.ts` | 15 |
+| 35 | git 无交互加固（锁/fsmonitor/hooks/凭证提示） | `git-safe.ts` + subagents/doctor | 15 |
 
 ## 关键设计对照
 
@@ -136,6 +139,23 @@
   `packages/core/docs/`（13 篇原创参考：overview/permissions/sandbox/
   providers/headless/mcp/memory/sessions/tools/skills-authoring/hooks/
   automations + index），全部按 dscode 实际行为撰写。
+- **防注入围栏**：`exec_command` 输出包进
+  `<<<UNTRUSTED_COMMAND_OUTPUT … >>>` 围栏并声明"仅是数据"；载荷内出现
+  的闭合哨兵被追加 `_` 破坏，防伪造逃逸。
+- **前台 sleep 守卫**：`sleep ≥2s` 的前台命令直接拒绝并引导改用后台
+  进程 + `write_stdin` 轮询，不再烧命令超时。
+- **退出码语义**：grep/rg/findstr 的 1（无匹配）、diff/cmp/fc 的 1（文件
+  不同）、test/[ 的 1（条件为假）、find 的 1、超时 124 等良性非零退出
+  附带解释，避免模型把良性失败当错误处理。
+- **进程退出扫描**：后台子进程 pid 入注册表，DSCode 进程退出时对遗留者
+  SIGKILL/taskkill /T /F 清扫，杜绝孤儿进程。exit 先于 close 时
+  （孙进程占住管道）100ms 后按 exit 结算，任务不再挂到超时。
+- **git 无交互加固**：`runProcess` 新增 `envOverlay`；
+  subagents/doctor 的 git 调用统一走 `gitSafeArgs`
+  （`--no-optional-locks`、`core.fsmonitor=false`、`core.hooksPath=NUL//
+  dev/null`）+ `gitSafeEnv`（`GIT_TERMINAL_PROMPT=0`、空 ASKPASS、
+  BatchMode SSH）——不抢索引锁、不启 fsmonitor、不触发用户 hooks、
+  凭证缺失时快速失败而非挂起等待输入。
 
 ## 与 command-code 的有意差异
 
@@ -193,4 +213,5 @@
 `test/batch10.test.ts`（批次 10：代码采样/学习回滚/Cursor 提取/次级提示，12 用例）、
 `test/batch11.test.ts`（批次 11：@import 展开/深度上限/分层加载/孤儿修复/回滚点选择，11 用例）、
 `test/batch12.test.ts`（沙箱自适应后端，5 用例）、
-`test/batch13.test.ts`（批次 12-14：自动命名/输入修复/指示器/桥发现/知识文档，13 用例）。
+`test/batch13.test.ts`（批次 12-14：自动命名/输入修复/指示器/桥发现/知识文档，13 用例）、
+`test/batch15.test.ts`（批次 15：围栏/哨兵中和/sleep 守卫/退出码语义/git 加固，11 用例）。

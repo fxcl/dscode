@@ -15,6 +15,8 @@ interface RunProcessOptions {
   timeoutMs?: number;
   maxOutputBytes?: number;
   shell?: boolean | string;
+  /** Extra environment entries layered over the inherited environment. */
+  envOverlay?: Record<string, string | undefined>;
 }
 
 export function runProcess(
@@ -26,7 +28,7 @@ export function runProcess(
   const timeoutMs = options.timeoutMs ?? 120_000;
 
   return new Promise((resolve, reject) => {
-    const env = stripModelCredentialEnvironment({ ...process.env });
+    const env = stripModelCredentialEnvironment({ ...process.env, ...(options.envOverlay ?? {}) });
 
     const child = spawn(command, args, {
       cwd: options.cwd,

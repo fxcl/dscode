@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
+import { gitSafeArgs, gitSafeEnv } from "./git-safe.js";
 
 import {
   detectAvailableProviders,
@@ -216,7 +217,7 @@ export async function runDoctor(options: DoctorOptions): Promise<void> {
   let branch = "";
   if (gitAvail === "available") {
     try {
-      const res = spawnSync("git", ["branch", "--show-current"], { cwd: options.workingDir, encoding: "utf-8" });
+      const res = spawnSync("git", gitSafeArgs(["branch", "--show-current"]), { cwd: options.workingDir, encoding: "utf-8", env: gitSafeEnv({ ...process.env }) });
       if (res.status === 0) {
         branch = res.stdout.trim();
       }
