@@ -43,6 +43,9 @@
 | 33 | 防注入输出围栏 + 前台 sleep 守卫 + 退出码语义 | `command-semantics.ts` | 15 |
 | 34 | 进程退出扫描 + exit-grace 结算（孙进程占管道防挂） | `managed-process.ts` | 15 |
 | 35 | git 无交互加固（锁/fsmonitor/hooks/凭证提示） | `git-safe.ts` + subagents/doctor | 15 |
+| 36 | MCP 输出 token 帽 + 溢出落盘 + 二进制持久化 | `mcp-output.ts` + mcp.ts | 16 |
+| 37 | 容错编辑锚定（标点折叠 + 按行缩进重映射） | `patch.ts` | 16 |
+| 38 | 词级 diff 配对（Dice 配对 + token LCS 高亮） | `word-diff.ts` + colorPatch | 16 |
 
 ## 关键设计对照
 
@@ -150,6 +153,16 @@
 - **进程退出扫描**：后台子进程 pid 入注册表，DSCode 进程退出时对遗留者
   SIGKILL/taskkill /T /F 清扫，杜绝孤儿进程。exit 先于 close 时
   （孙进程占住管道）100ms 后按 exit 结算，任务不再挂到超时。
+- **MCP 输出预算**：MCP 工具结果按 25k token 估算（`MCP_OUTPUT_TOKEN_LIMIT` 可调，
+  非`文本块按 1600 计）；超限时全文落盘到临时目录并在返回文本中附截断说明与
+  读取指引；image/blob 载荷一律持久化到磁盘并替换为指针，base64 不再进入上下文。
+- **容错编辑锚定**：`apply_patch` 的上下文匹配阶梯扩展为 exact → trimEnd →
+  trim → 标点折叠（弯引号/长破折/省略号归一）→ 缩进不敏感；后三级命中时
+  替换行按匹配块内对应文件行的缩进重排（保留相对层级），修复从聊天客户端
+  粘贴导致的 patch 重试循环。
+- **词级 diff**：相邻 -/+ 行块按字符袋 Dice 系数（≥0.3）贪心 1:1 配对
+  （超 200 对退化为位置配对），配对行做 token 级 LCS——变更词加粗高亮、
+  未变词淡化，diff 一眼可见实际改动。
 - **git 无交互加固**：`runProcess` 新增 `envOverlay`；
   subagents/doctor 的 git 调用统一走 `gitSafeArgs`
   （`--no-optional-locks`、`core.fsmonitor=false`、`core.hooksPath=NUL//
@@ -215,3 +228,4 @@
 `test/batch12.test.ts`（沙箱自适应后端，5 用例）、
 `test/batch13.test.ts`（批次 12-14：自动命名/输入修复/指示器/桥发现/知识文档，13 用例）、
 `test/batch15.test.ts`（批次 15：围栏/哨兵中和/sleep 守卫/退出码语义/git 加固，11 用例）。
+`test/batch16.test.ts`（批次 16：词级配对/标点锚定/缩进重映射/MCP 预算，15 用例）。

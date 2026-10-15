@@ -228,18 +228,36 @@ function applyUpdate(content: string, action: UpdateAction): string {
       .map((line) => line.slice(1));
 
     let matchIndex: number;
+    let reindent: ((lines: string[]) => string[]) | undefined;
     if (oldLines.length === 0) {
       matchIndex = hunk.endOfFile ? output.length : findHeaderPosition(output, hunk.header, cursor);
     } else {
-      matchIndex = findSequence(output, oldLines, cursor, hunk.header);
+      const located = findSequence(output, oldLines, cursor, hunk.header);
+      matchIndex = located.index;
+      reindent = located.reindent;
     }
 
-    output.splice(matchIndex, oldLines.length, ...newLines);
-    cursor = matchIndex + newLines.length;
+    // An indent-insensitive match means the patch's own indentation is
+    // untrustworthy; the replacement adopts the indentation actually found in
+    // the file instead.
+    const applied = reindent ? reindent(newLines) : newLines;
+    output.splice(matchIndex, oldLines.length, ...applied);
+    cursor = matchIndex + applied.length;
   }
 
   const trailingNewline = file.trailingNewline || action.hunks.some((hunk) => hunk.endOfFile);
   return output.join("\n") + (trailingNewline && output.length > 0 ? "\n" : "");
+}
+
+type SequenceMode = "exact" | "trimEnd" | "trim" | "punctuation" | "indent";
+
+interface SequenceLocation {
+  index: number;
+  /**
+   * Set only for indent-mode matches: re-indents replacement lines to the
+   * indentation actually found in the file.
+   */
+  reindent?: (lines: string[]) => string[];
 }
 
 function findSequence(
@@ -247,17 +265,26 @@ function findSequence(
   needle: string[],
   cursor: number,
   header: string,
-): number {
+): SequenceLocation {
   const hinted = parseLineHint(header);
   const starts = hinted === undefined ? [cursor] : [Math.max(cursor, hinted), cursor];
 
   for (const start of starts) {
-    for (const mode of ["exact", "trimEnd", "trim"] as const) {
+    for (const mode of ["exact", "trimEnd", "trim", "punctuation", "indent"] as const) {
       for (let index = start; index <= haystack.length - needle.length; index += 1) {
         if (
           needle.every((line, offset) => normalizeLine(haystack[index + offset]!, mode) === normalizeLine(line, mode))
         ) {
-          return index;
+          // Every mode from "trim" on ignores leading whitespace, so the
+          // replacement must adopt the file's indentation — per line, since
+          // e.g. a function signature is flush while its body is indented.
+          if (mode === "trim" || mode === "punctuation" || mode === "indent") {
+            return {
+              index,
+              reindent: (lines: string[]) => reindentLines(lines, haystack, index, needle.length),
+            };
+          }
+          return { index };
         }
       }
     }
@@ -265,6 +292,32 @@ function findSequence(
 
   const preview = needle.slice(0, 3).join("\\n");
   throw new Error(`Patch context not found${header ? ` near ${header}` : ""}: ${preview}`);
+}
+
+function leadingWhitespace(line: string): string {
+  return /^\s*/.exec(line)?.[0] ?? "";
+}
+
+/**
+ * Re-apply the file's indentation to replacement lines. Each line takes the
+ * indent of the file line at its position in the matched block (clamped to
+ * the block), with the replacement's own common indent preserved relative to
+ * that. Blank lines stay blank.
+ */
+function reindentLines(
+  lines: readonly string[],
+  haystack: readonly string[],
+  index: number,
+  blockLength: number,
+): string[] {
+  const indents = lines.filter((line) => line.trim() !== "").map((line) => leadingWhitespace(line).length);
+  const common = indents.length > 0 ? Math.min(...indents) : 0;
+  return lines.map((line, lineIndex) => {
+    if (line.trim() === "") return line;
+    const source = haystack[Math.min(index + Math.min(lineIndex, blockLength - 1), haystack.length - 1)] ?? "";
+    const base = leadingWhitespace(source);
+    return base + line.slice(Math.min(common, leadingWhitespace(line).length));
+  });
 }
 
 function findHeaderPosition(lines: string[], header: string, cursor: number): number {
@@ -280,7 +333,25 @@ function parseLineHint(header: string): number | undefined {
   return match ? Math.max(0, Number(match[1]) - 1) : undefined;
 }
 
-function normalizeLine(value: string, mode: "exact" | "trimEnd" | "trim"): string {
+/**
+ * Punctuation folding for tolerant matching: model-supplied context pasted
+ * from chat clients carries curly quotes, typographic dashes, and ellipsis
+ * where the file has ASCII equivalents.
+ */
+function foldPunctuation(value: string): string {
+  return value
+    .replaceAll("’", "'")
+    .replaceAll("‘", "'")
+    .replaceAll("“", '"')
+    .replaceAll("”", '"')
+    .replaceAll("—", "--")
+    .replaceAll("–", "-")
+    .replaceAll("…", "...");
+}
+
+function normalizeLine(value: string, mode: SequenceMode): string {
+  if (mode === "indent") return foldPunctuation(value.trim().replace(/^\s+/, ""));
+  if (mode === "punctuation") return foldPunctuation(value.trim());
   if (mode === "trim") return value.trim();
   if (mode === "trimEnd") return value.trimEnd();
   return value;

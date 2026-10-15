@@ -125,6 +125,7 @@ import {
   sandboxUnavailableGuidance,
 } from "./sandbox.js";
 import { formatRepairs, repairToolInput } from "./tool-repair.js";
+import { renderChangeBlock } from "./word-diff.js";
 import { registerSessionCommands } from "./session-commands.js";
 import { registerServiceTierControls } from "./service-tier.js";
 import { formatStatusReport, summarizeSessionUsage } from "./status.js";
@@ -2580,14 +2581,52 @@ function colorPatch(
   patch: string,
   theme: ExtensionContext["ui"]["theme"],
 ): string {
-  return patch
-    .split("\n")
-    .map((line) => {
-      if (line.startsWith("+")) return theme.fg("toolDiffAdded", line);
-      if (line.startsWith("-")) return theme.fg("toolDiffRemoved", line);
-      return theme.fg("toolDiffContext", line);
-    })
-    .join("\n");
+  const lines = patch.split("\n");
+  const output: string[] = [];
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index]!;
+    if (line.startsWith("-")) {
+      // Adjacent change block: removed run immediately followed by added run
+      // gets word-level pairing; changed words render bold within the dimmed
+      // line so the eye lands on what actually moved.
+      const removed: string[] = [];
+      let cursor = index;
+      while (cursor < lines.length && lines[cursor]!.startsWith("-")) {
+        removed.push(lines[cursor]!.slice(1));
+        cursor += 1;
+      }
+      const added: string[] = [];
+      while (cursor < lines.length && lines[cursor]!.startsWith("+")) {
+        added.push(lines[cursor]!.slice(1));
+        cursor += 1;
+      }
+      for (const rendered of renderChangeBlock(removed, added)) {
+        const color = rendered.kind === "removed" ? "toolDiffRemoved" : "toolDiffAdded";
+        if (rendered.emphasized) {
+          const body = rendered.segments
+            .map((segment) =>
+              segment.changed
+                ? theme.fg(color, theme.bold(segment.text))
+                : theme.fg("toolDiffContext", segment.text),
+            )
+            .join("");
+          output.push(theme.fg(color, rendered.prefix) + body);
+        } else {
+          output.push(theme.fg(color, rendered.prefix + rendered.segments.map((segment) => segment.text).join("")));
+        }
+      }
+      index = cursor;
+      continue;
+    }
+    if (line.startsWith("+")) {
+      output.push(theme.fg("toolDiffAdded", line));
+    } else {
+      output.push(theme.fg("toolDiffContext", line));
+    }
+    index += 1;
+  }
+  return output.join("\n");
 }
 
 function formatManagedResult(result: ManagedProcessResult): string {

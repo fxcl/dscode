@@ -8,6 +8,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { z } from "zod";
 import { renderCollapsibleToolResult, renderToolCall } from "./tool-ui.js";
 import { getDSCodeHome } from "./home.js";
+import { enforceMcpOutputLimit, persistBinaryPayload } from "./mcp-output.js";
 import { loadVault, resolveVaultReferences, type VaultFile } from "./mcp-vault.js";
 import { stripModelCredentialEnvironment } from "./providers.js";
 import { buildLaneModels } from "./lanes.js";
@@ -177,7 +178,7 @@ export class MCPManager {
               undefined,
               signal ? { signal } : {},
             );
-            const text = formatMcpResult(result);
+            const text = await formatMcpResult(serverName, result);
             if (result.isError) throw new Error(text);
             return {
               content: [{ type: "text", text }],
@@ -244,15 +245,40 @@ function sanitizeName(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, "_");
 }
 
-function formatMcpResult(result: Awaited<ReturnType<Client["callTool"]>>): string {
+/**
+ * Render an MCP tool result under the output budget: text is capped with a
+ * pointer to the spilled full output; image and binary payloads are persisted
+ * to disk and replaced by a human/model-readable pointer, so oversized or
+ * binary data never floods the model context.
+ */
+async function formatMcpResult(
+  serverName: string,
+  result: Awaited<ReturnType<Client["callTool"]>>,
+): Promise<string> {
   const parts: string[] = [];
   const content = Array.isArray(result.content) ? result.content : [];
   for (const item of content as Array<Record<string, any>>) {
     if (item.type === "text") {
       parts.push(item.text);
+    } else if (item.type === "image") {
+      if (typeof item.data === "string" && item.data.length > 0) {
+        parts.push(await persistBinaryPayload(serverName, item.mimeType ?? "image/png", item.data));
+      }
     } else if (item.type === "resource") {
       const resource = item.resource;
-      parts.push("text" in resource ? resource.text : `[binary resource: ${resource.uri}]`);
+      if (resource && "text" in resource && typeof resource.text === "string") {
+        parts.push(resource.text);
+      } else if (resource && "blob" in resource && typeof resource.blob === "string") {
+        parts.push(
+          await persistBinaryPayload(
+            serverName,
+            (resource as { mimeType?: string }).mimeType ?? "application/octet-stream",
+            resource.blob,
+          ),
+        );
+      } else {
+        parts.push(`[binary resource: ${resource?.uri}]`);
+      }
     } else if (item.type === "resource_link") {
       parts.push(`[resource: ${item.name}](${item.uri})`);
     } else {
@@ -262,5 +288,7 @@ function formatMcpResult(result: Awaited<ReturnType<Client["callTool"]>>): strin
   if (result.structuredContent !== undefined) {
     parts.push(JSON.stringify(result.structuredContent, null, 2));
   }
-  return parts.join("\n\n") || "(MCP tool returned no text)";
+  const joined = parts.join("\n\n") || "(MCP tool returned no text)";
+  const outcome = await enforceMcpOutputLimit(serverName, joined);
+  return outcome.text;
 }
