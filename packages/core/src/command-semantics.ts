@@ -51,8 +51,8 @@ export function detectBlockedSleep(command: string): BlockedSleep | undefined {
 export function blockedSleepMessage(seconds: number): string {
   return (
     `Foreground "sleep ${seconds}" was rejected - sleeping in the foreground wastes the command timeout. ` +
-    "Run the actual work in the background (exec_command returns a process_id for long-running commands), " +
-    "then poll it with write_stdin instead of sleeping."
+    "Use the sleep tool instead: it pauses without holding a shell process (seconds, or until a wall-clock time). " +
+    'For a running background process, write_stdin with wait_for: "output" or "exit" returns the moment something happens.'
   );
 }
 

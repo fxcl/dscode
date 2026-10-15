@@ -133,6 +133,11 @@ export class BoundedOutput {
     return this.seen > this.limit;
   }
 
+  /** Total characters appended so far, including everything evicted. */
+  get totalSeen(): number {
+    return this.seen;
+  }
+
   append(chunk: string): void {
     this.seen += chunk.length;
     let remaining = chunk;

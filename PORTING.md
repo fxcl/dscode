@@ -58,6 +58,9 @@
 | 48 | 重复读防护（LRU 窗口计数 + mtime/size 校验） | `reread-guard.ts` | 17 |
 | 49 | SSRF 防护（凭据拒绝 / 私网全族 / http→https 升级） | `ssrf-guard.ts` + fetch 点 | 17 |
 | 50 | 凭证文件守卫（读取需审批 + 段/basename 两级判定 + glob 反向匹配） | `sensitive-paths.ts` | 18 |
+| 51 | sleep 工具（不占 shell 进程的等待 + 单次上限自解释 + until 墙钟） | `sleep.ts` | 19 |
+| 52 | PowerShell 退出码规范化包装器（host 路径） | `shell.ts` `buildPowerShellExitWrapper` | 19 |
+| 53 | write_stdin wait_for（等输出/等退出，事件驱动而非盲等窗口） | `managed-process.ts` `waitFor` | 19 |
 
 ## 关键设计对照
 
@@ -316,6 +319,40 @@
   已知限制：批次 18-2（PowerShell 只读分类器）待做——Windows 上 `classifyCommand`
   不识别 PowerShell，只读 cmdlet 也走审批，与本守卫正交。
 
+### 批次 19 设计要点（2026-10-15）
+
+三件独立的"等待语义 + Windows 正确性"移植，填补既有机制之间的空隙。
+
+- **sleep 工具**（`sleep.ts`）：批次 15 拦前台 `sleep`、批次 17 的
+  `schedule_wakeup` 下限 60s、`write_stdin` 盲等整窗——三者的夹缝里
+  30 秒级等待（部署收尾、限流退避）没有任何体面工具。sleep 填这个洞：
+  `seconds` 或 `until`（ISO-8601 或 `"HH:MM[:SS]"` 下一出现语义，已过即
+  明天）二选一强制校验；单次上限 10 分钟且**上限自解释**（截断时说明
+  剩余量、指引再次调用）；流式进度（含可选 reason）；可被 Esc 打断；
+  `executionMode: "parallel"` 可与其他工具并行。描述直接教成本模型：
+  "每次唤醒花一次 API 往返——宁长勿频"。**有意差异**：源机制的
+  `wake_on_input`（排队输入立即唤醒）未移植——pi 运行时没有 pending-input
+  探测面；Esc 打断经 abort 信号仍然可用。前台 sleep 拦截文案同步改指
+  本工具与 write_stdin 的 wait_for。
+- **PowerShell 退出码规范化**（`shell.ts`）：裸 `pwsh -Command <cmd>` 不
+  传播原生命令失败——`npm test; echo done` 里 npm 挂了进程照样退 0，
+  cmdlet-only 管道恒为 0。包装器在命令后追加 `$__dsOk = $?` →
+  `$LASTEXITCODE` 回退 → `exit $__dsExit` 三行，使进程退出码等于 shell
+  实际结果。只作用于 **host 路径**（`user_bash`/无沙箱执行）；native
+  sandbox 路径有独立的 WFP 包装，未动。**测试用真实 pwsh 验证**：裸命令
+  把 `process.exit(5)` 吞成退出码 0，包装后正确返回 5，成功命令仍为 0。
+- **write_stdin wait_for**（`managed-process.ts` `waitFor`）：新增
+  `wait_for: "output"|"exit"` + `timeout_ms`（≤10 分钟/次）。`waitFor`
+  以 250ms tick 轮询非破坏性 `describe()`/`outputSize()`，output 模式
+  **一有新输出立即返回**，exit 模式等进程结束；结果附自解释注记（等待
+  多久等到什么；超时指引继续等待或直接读输出）。与批次 17 的 monitor
+  互补：monitor 是被动唤醒（不等在工具里），wait_for 是主动阻塞读。
+  `BoundedOutput` 补 `totalSeen` getter（含被逐出部分的总字符数）。
+
+测试注意：真实 pwsh/进程用例的 vitest 用例超时显式放宽到 60s（默认 5s
+在并发 worker 下会被 pwsh/node 冷启动击穿），时序上界断言使用相对等待
+预算的比值而非绝对墙。
+
 ## 已知限制
 
 - lane 模型克隆会话模型的 `contextWindow`（1M）；flash 档真实窗口更小，
@@ -380,3 +417,5 @@
 校验器证据与围栏/自调度链条/复读窗口/SSRF 全族，76 用例）。
 `test/batch18.test.ts`（批次 18-1：凭证模式集/段与 basename 两级/Windows 分隔/
 `.envrc` 刻意不匹配边界/flag=value 值侧/shell 逐 token/MCP 浅扫，18 用例）。
+`test/batch19.test.ts`（批次 19：until 解析/钳制/结果文案/sleep 注册/拦截文案/
+**真实 pwsh 退出码传播**/waitFor 四结局/outputSize 非破坏性，20 用例）。

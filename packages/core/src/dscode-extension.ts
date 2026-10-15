@@ -21,6 +21,7 @@ import { Type } from "typebox";
 import path from "node:path";
 import { stat as statFile } from "node:fs/promises";
 import { createRereadGuard } from "./reread-guard.js";
+import { registerSleepTool } from "./sleep.js";
 import {
   buildMonitorWakeupPrompt,
   buildSelfWakeupPrompt,
@@ -276,6 +277,22 @@ const writeStdinParameters = Type.Object({
   chars: Type.Optional(Type.String({ description: "Characters to write to stdin" })),
   yield_time_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 30_000 })),
   terminate: Type.Optional(Type.Boolean({ description: "Terminate this process" })),
+  wait_for: Type.Optional(
+    Type.Union([
+      Type.Literal("output"),
+      Type.Literal("exit"),
+    ], {
+      description:
+        'Block until the event happens instead of for a fixed window: "output" returns as soon as new output arrives, "exit" waits for the process to finish. Combined with timeout_ms; on timeout the normal result (including any pending output) is still returned.',
+    }),
+  ),
+  timeout_ms: Type.Optional(
+    Type.Integer({
+      minimum: 0,
+      maximum: 600_000,
+      description: "Maximum wait when wait_for is set (default 60_000, capped at 10 minutes per call).",
+    }),
+  ),
 });
 
 const applyPatchParameters = Type.Object({
@@ -577,6 +594,10 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
         },
       });
       registerScheduleTools(pi, () => armSchedulerTimer());
+      // Sleep: wait without holding a shell process. Complements the
+      // foreground-sleep guard (batch 15), schedule_wakeup's 60s floor, and
+      // write_stdin's blind yield windows.
+      registerSleepTool(pi);
       // Agent self-scheduling: one pending check-in at a time, fenced wakeup
       // prompt, chain cap so self-scheduling cannot become an undeclared loop.
       pi.registerTool({
@@ -2766,20 +2787,38 @@ function registerCommandTools(
     name: "write_stdin",
     label: "Write to process",
     description:
-      "Write characters to, poll, or terminate a managed process returned by exec_command.",
-    promptSnippet: "write_stdin: interact with or poll a managed background process",
+      "Write characters to, poll, wait on, or terminate a managed process returned by exec_command. wait_for blocks until new output arrives or the process exits (bounded by timeout_ms), so polling does not burn blind yield windows.",
+    promptSnippet: "write_stdin: interact with, wait on, or poll a managed background process",
     parameters: writeStdinParameters,
     renderShell: "self",
     executionMode: "sequential",
-    async execute(_id, params) {
+    async execute(_id, params, signal) {
+      let waitNote: string | undefined;
+      if (params.wait_for !== undefined && params.chars === undefined && params.terminate !== true) {
+        const wait = await registry.waitFor(params.process_id, {
+          mode: params.wait_for,
+          timeoutMs: Math.min(params.timeout_ms ?? 60_000, 600_000),
+          ...(signal ? { signal } : {}),
+        });
+        waitNote =
+          wait.outcome === "already-finished"
+            ? "The process had already finished before the wait started."
+            : wait.outcome === "exited"
+              ? `The process exited after ${wait.waitedMs}ms of waiting.`
+              : wait.outcome === "new-output"
+                ? `New output arrived after ${wait.waitedMs}ms of waiting.`
+                : wait.outcome === "interrupted"
+                  ? `Wait interrupted by the user after ${wait.waitedMs}ms.`
+                  : `No ${params.wait_for === "output" ? "new output" : "exit"} within the wait budget (${wait.waitedMs}ms). Call write_stdin again with wait_for to keep waiting, or read the output now.`;
+      }
       const result = await registry.interact(params.process_id, {
         ...(params.chars === undefined ? {} : { chars: params.chars }),
         yieldTimeMs: params.yield_time_ms ?? 5_000,
         terminate: params.terminate ?? false,
       });
       return {
-        content: [{ type: "text", text: formatManagedResult(result) }],
-        details: result,
+        content: [{ type: "text", text: waitNote ? `${waitNote}\n\n${formatManagedResult(result)}` : formatManagedResult(result) }],
+        details: { ...result, ...(waitNote ? { wait: waitNote } : {}) },
       };
     },
     renderCall(args, theme, context) {

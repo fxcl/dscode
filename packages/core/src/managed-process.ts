@@ -44,6 +44,13 @@ export interface ManagedProcessResult {
   command?: string;
 }
 
+export type WaitOutcomeName = "already-finished" | "exited" | "new-output" | "interrupted" | "timed-out";
+
+export interface WaitForResult {
+  outcome: WaitOutcomeName;
+  waitedMs: number;
+}
+
 interface ProcessRecord {
   id: string;
   child: ChildProcessWithoutNullStreams;
@@ -210,6 +217,67 @@ export class ManagedProcessRegistry {
       command: record.command,
       sandbox: record.sandbox,
     };
+  }
+
+  /** Total output characters seen so far; undefined for unknown processes. */
+  outputSize(processId: string): number | undefined {
+    return this.records.get(processId)?.output.totalSeen;
+  }
+
+  /**
+   * Block until a waited-for event happens instead of for a fixed window:
+   * mode "exit" resolves when the process finishes, mode "output" resolves
+   * the moment new output arrives. Polls at a fine tick so a slow consumer
+   * still sees sub-second latency; the abort signal ends the wait early.
+   */
+  async waitFor(
+    processId: string,
+    options: {
+      mode: "output" | "exit";
+      timeoutMs: number;
+      signal?: AbortSignal | undefined;
+      tickMs?: number | undefined;
+    },
+  ): Promise<WaitForResult> {
+    const tickMs = options.tickMs ?? 250;
+    const started = this.describe(processId);
+    if (!started || !started.running) {
+      return { outcome: "already-finished", waitedMs: 0 };
+    }
+    let waitedMs = 0;
+    let lastSize = this.outputSize(processId) ?? 0;
+    while (waitedMs < options.timeoutMs) {
+      if (options.signal?.aborted) {
+        return { outcome: "interrupted", waitedMs };
+      }
+      const slice = Math.min(tickMs, options.timeoutMs - waitedMs);
+      const interrupted = await new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => resolve(false), slice);
+        timer.unref?.();
+        options.signal?.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(timer);
+            resolve(true);
+          },
+          { once: true },
+        );
+      });
+      waitedMs += slice;
+      if (interrupted) {
+        return { outcome: "interrupted", waitedMs };
+      }
+      const info = this.describe(processId);
+      if (!info || !info.running) {
+        return { outcome: "exited", waitedMs };
+      }
+      const size = this.outputSize(processId) ?? 0;
+      if (options.mode === "output" && size > lastSize) {
+        return { outcome: "new-output", waitedMs };
+      }
+      lastSize = size;
+    }
+    return { outcome: "timed-out", waitedMs };
   }
 
   dispose(): void {
