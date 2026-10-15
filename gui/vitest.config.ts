@@ -3,7 +3,7 @@ import path from 'node:path'
 
 // Default unit-test run: fast, hermetic, no real omp/pi processes.
 // The real-binary compatibility suite lives in integration/omp and runs via
-// `pnpm test:omp` (vitest.omp.config.ts).
+// `pnpm test:dscode` (vitest.dscode.config.ts).
 export default defineConfig({
   resolve: {
     alias: {

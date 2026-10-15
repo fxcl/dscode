@@ -25,6 +25,7 @@ logs/
 
 # packaging artifacts
 *.tgz
+*.vsix
 
 # vendored upstream reference checkouts (not part of this repo)
 feynman/
