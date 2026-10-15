@@ -23,14 +23,14 @@
     "packages/core/package.json",
     "packages/core/README.md",
     "packages/core/LICENSE",
-    "docs",
     "editors",
     "scripts/install-message.mjs",
     "scripts/postinstall.mjs",
     "scripts/live-smoke.mjs",
     "scripts/live-features.mjs",
     ".env.example",
-    "README.md"
+    "README.md",
+    "packages/core/docs"
   ],
   "bin": {
     "dscode": "./dist/cli.js"
