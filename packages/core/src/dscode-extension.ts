@@ -77,6 +77,10 @@ import {
 } from "./goal-verifier.js";
 import { permissionSchema, type PermissionMode } from "./config.js";
 import {
+  inspectToolAccess,
+  sensitivePathReason,
+} from "./sensitive-paths.js";
+import {
   KEEP_RECENT_TOOL_RESULTS,
   pruneOldToolResults,
   repairOrphanToolResults,
@@ -1180,6 +1184,34 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
             block: true,
             reason: `Plan mode does not allow ${event.toolName}. Run /plan to leave plan mode.`,
           };
+        }
+        // Credential-file guard: reads of secret-bearing files need explicit
+        // approval like writes do, because a secret in the context leaks
+        // through transcripts, shares, and telemetry. Runs before the
+        // read-tools auto-allow shortcut; honored in every mode except the
+        // explicitly trusted "full" run.
+        const sensitiveGuardEnabled = process.env.DSCODE_GUARD_SENSITIVE !== "off";
+        if (sensitiveGuardEnabled && permission !== "full") {
+          const sensitive = inspectToolAccess(event.toolName, event.input);
+          if (sensitive) {
+            const reason = sensitivePathReason(sensitive.subject, sensitive.access);
+            if (!ctx.hasUI) {
+              return {
+                block: true,
+                reason: `${reason}\nNo interactive approval UI is available; re-run with --permission full for an explicitly trusted non-interactive task.`,
+              };
+            }
+            ctx.ui.setWorkingVisible(false);
+            let approved: boolean | undefined;
+            try {
+              approved = await ctx.ui.confirm(`Read credential file ${sensitive.subject}?`, reason);
+            } finally {
+              ctx.ui.setWorkingVisible(true);
+            }
+            if (!approved) {
+              return { block: true, reason: `Reading ${sensitive.subject} denied by user` };
+            }
+          }
         }
         const externalMcp = event.toolName.startsWith("mcp__");
         const command =
@@ -2366,6 +2398,13 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
                 return guidance ? [`sandbox fix: ${guidance}`] : [];
               })(),
               `session grants: ${access.describeGrants().join(", ") || "none"}`,
+              `credential guard: ${
+                process.env.DSCODE_GUARD_SENSITIVE === "off"
+                  ? "off (DSCODE_GUARD_SENSITIVE=off)"
+                  : permission === "full"
+                    ? "bypassed in this run (--permission full)"
+                    : "on (credential-file reads require approval)"
+              }`,
               `workspace trusted: ${ctx.isProjectTrusted() ? "yes" : "no"}`,
               `session: ${ctx.sessionManager.getSessionFile() ?? "memory only"}`,
               `fallback: ${fallbackSelection ? `${describeFallback(fallbackSelection)} on quota failures` : "not configured"}`,

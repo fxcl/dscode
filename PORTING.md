@@ -57,6 +57,7 @@
 | 47 | 工具改名别名引导（未知工具名给出正确调用而非 schema 报错） | `deferred-tools.ts` `describeToolAlias` | 17 |
 | 48 | 重复读防护（LRU 窗口计数 + mtime/size 校验） | `reread-guard.ts` | 17 |
 | 49 | SSRF 防护（凭据拒绝 / 私网全族 / http→https 升级） | `ssrf-guard.ts` + fetch 点 | 17 |
+| 50 | 凭证文件守卫（读取需审批 + 段/basename 两级判定 + glob 反向匹配） | `sensitive-paths.ts` | 18 |
 
 ## 关键设计对照
 
@@ -297,6 +298,24 @@
 （factory 每进程一次，防止 `/resume` 换会话后带着上一会话耗尽的预算开局）；
 `describe()` 与 SSRF 模块注释收紧至如实描述覆盖面（Teredo 未拦截，与源一致）。
 
+## 批次 18 设计要点（2026-10-15）
+
+- **凭证文件守卫**（`sensitive-paths.ts`，批次 18-1）：`.env*`、`*.pem`、
+  `*.key`、`id_rsa*`/`id_ed25519*`/`id_ecdsa*`、`credentials*`、`*.crt`、
+  `.npmrc`、`.pypirc`、`.netrc`（模式集为移植的机制事实）+ **有意扩展**
+  `secrets`/`secrets.*`（最常见的凭证目录约定；误报成本是一次审批弹窗，
+  漏报成本是整个目录进上下文）。判定两级：路径任一段命中（`deploy/secrets/`
+  整目录覆盖）+ basename 命中。接线在 `tool_call` 闸口、**读工具免审批捷径
+  之前**——`auto` 模式下读凭证文件也会弹确认（这是"密钥进上下文"防线，
+  不是防破坏）；plan 模式生效；`--permission full`（显式可信运行）跳过；
+  headless 无 UI 硬拦截并指向 `--permission full`；`DSCODE_GUARD_SENSITIVE=off`
+  可关；`/doctor` 显示状态。`inspectToolAccess` 覆盖文件工具的路径参数、
+  glob 形 pattern（**把输入当 glob、清单名当字面量**的反向匹配，`**/.env*`
+  即凭证读取意图）、shell 命令逐 token（含 `--flag=value` 的值侧）、
+  MCP 工具字符串值浅扫（误报一次弹窗，漏报泄密）。`/permissions` 不受影响。
+  已知限制：批次 18-2（PowerShell 只读分类器）待做——Windows 上 `classifyCommand`
+  不识别 PowerShell，只读 cmdlet 也走审批，与本守卫正交。
+
 ## 已知限制
 
 - lane 模型克隆会话模型的 `contextWindow`（1M）；flash 档真实窗口更小，
@@ -359,3 +378,5 @@
 `test/batch16.test.ts`（批次 16：词级配对/标点锚定/缩进重映射/MCP 预算，15 用例）。
 `test/batch17.test.ts`（批次 17：计划护栏/机械摘要/续跑三类/延迟工具检索/
 校验器证据与围栏/自调度链条/复读窗口/SSRF 全族，76 用例）。
+`test/batch18.test.ts`（批次 18-1：凭证模式集/段与 basename 两级/Windows 分隔/
+`.envrc` 刻意不匹配边界/flag=value 值侧/shell 逐 token/MCP 浅扫，18 用例）。
