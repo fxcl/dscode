@@ -1,6 +1,6 @@
 {
   "name": "@thinkany/dscode",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "A local-first, multi-provider coding agent with DeepSeek defaults.",
   "type": "module",
   "license": "MIT",
