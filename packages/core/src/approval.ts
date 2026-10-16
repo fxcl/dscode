@@ -1,4 +1,6 @@
+import process from "node:process";
 import type { PermissionMode } from "./config.js";
+import { isReadOnlyPowerShellCommand, looksLikePowerShell } from "./powershell-readonly.js";
 
 export type Confirmation = (message: string) => Promise<boolean>;
 
@@ -98,6 +100,14 @@ export function classifyCommand(command: string): CommandRisk {
     /\bgit\s+(checkout|restore)\b[^;&|]*(--|\s)\./i.test(normalized)
   ) {
     return "dangerous";
+  }
+
+  // Windows executes through PowerShell: route cmdlet-shaped commands to the
+  // PowerShell read-only classifier instead of punishing them with the POSIX
+  // shell-syntax bail below. The classifier is conservative - anything it
+  // cannot prove read-only lands in the normal approval path.
+  if (process.platform === "win32" && looksLikePowerShell(normalized)) {
+    return isReadOnlyPowerShellCommand(normalized) ? "read-only" : "needs-approval";
   }
 
   // Shell syntax can turn an otherwise harmless-looking command into a write

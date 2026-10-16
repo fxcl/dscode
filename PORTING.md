@@ -63,6 +63,7 @@
 | 53 | write_stdin wait_for（等输出/等退出，事件驱动而非盲等窗口） | `managed-process.ts` `waitFor` | 19 |
 | 54 | 环境上下文注入（dir/date/platform/结构/git 事实，会话级收集） | `env-context.ts` | 20 |
 | 55 | 实例锁（wx 原子 + PID 存活窃取 + 丢失监视 → 调度让位） | `instance-lock.ts` | 20 |
+| 56 | PowerShell 只读分类器（语句/管道切分 + 闭合白名单 + 参数规则 + git 特判） | `powershell-readonly.ts` | 18-2 |
 
 ## 关键设计对照
 
@@ -382,6 +383,28 @@
   显式不支持并给出指引），API 模块内部已引用，DSCode 零成本获得。
   自定义命令模板高级语法（`$1`/`${1:3}`/`${@:-default}`）属 pi 上游
   能力，不在扩展层移植。
+
+### 批次 18-2 设计要点（2026-10-16）
+
+- **PowerShell 只读分类器**（`powershell-readonly.ts`）：Windows 上
+  `classifyCommand` 原本对 cmdlet 形命令零词汇——每个 `Get-ChildItem`
+  式只读命令都弹审批。分类器是**刻意保守**的阅读器：语句（`;`/换行/
+  `&&`/`||`，双字符先行避免 `||` 被二次切分）与管道（`|`）切分均
+  引号感知；任何 `$`（变量/展开/双引号内插值）、反引号、脚本块、
+  圆括号、重定向、注释、`--%`、调用操作符 → 一票否决；每个管道段
+  必须命中**闭合白名单**（只收完整 Verb-Noun 名，别名如 `curl`/`rm`
+  永不通过——它们分别是 Invoke-WebRequest/Remove-Item）；参数须在
+  各命令安全集 + 公共参数集内；git 特判排除 `diff --output`/
+  `--ext-diff`（写文件/跑用户配置的外部 diff）与 `git branch <name>`
+  （创建分支，只放行裸 listing 形态）。接入点在 `classifyCommand`
+  的危险判定之后、POSIX 语法兜底之前，且仅 win32 生效；
+  `looksLikePowerShell` 路由保证 POSIX 形命令（rg/git 简单形态）零
+  行为变化。**真实 pwsh 冒烟**：每个被判只读的形态实际执行且退出码
+  为 0——分类器批准不可解析的语法等于把弹窗换成报错。
+- 已知边界：`&` 调用操作符整体拒绝（`& 'C:\...\git.exe' status` 走
+  审批）；白名单外的常用 cmdlet（如 `Get-Clipboard`——读剪贴板可能
+  带密钥——刻意不收）走正常审批；json/rpc 模式的
+  `--permission full` 语义不受影响。
 
 ## 已知限制
 
