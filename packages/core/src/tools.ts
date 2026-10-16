@@ -4,6 +4,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
 import fg from "fast-glob";
 import type { HarnessMode } from "./config.js";
+import { collectGitignorePatterns } from "./gitignore.js";
 import { applyWorkspacePatch } from "./patch.js";
 import { runProcess } from "./process.js";
 import { Workspace } from "./workspace.js";
@@ -19,6 +20,10 @@ const DEFAULT_IGNORES = [
 ];
 
 export function createCodingTools(workspace: Workspace, harness: HarnessMode = "safe"): AgentTool[] {
+  // User-declared .gitignore rules, collected once per factory (session)
+  // and merged into every listing and search below.
+  const gitignore = collectGitignorePatterns(workspace.root).catch(() => undefined);
+  const gitignorePatterns = async (): Promise<string[]> => (await gitignore)?.patterns ?? [];
   const readFileParameters = Type.Object({
     path: Type.String({ description: "Workspace-relative file path" }),
     line_start: Type.Optional(Type.Integer({ minimum: 1, description: "First line, inclusive" })),
@@ -82,7 +87,7 @@ export function createCodingTools(workspace: Workspace, harness: HarnessMode = "
         onlyFiles: true,
         dot: true,
         followSymbolicLinks: false,
-        ignore: DEFAULT_IGNORES,
+        ignore: [...DEFAULT_IGNORES, ...(await gitignorePatterns())],
         unique: true,
       });
       matches.sort();
@@ -119,6 +124,7 @@ export function createCodingTools(workspace: Workspace, harness: HarnessMode = "
         "--max-count",
         String(limit),
         ...DEFAULT_IGNORES.flatMap((item) => ["--glob", `!${item}`]),
+        ...(await gitignorePatterns()).flatMap((item) => ["--glob", `!${item}`]),
       ];
       if (params.literal ?? false) args.push("--fixed-strings");
       if (params.glob) args.push("--glob", params.glob);

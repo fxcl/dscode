@@ -64,6 +64,9 @@
 | 54 | 环境上下文注入（dir/date/platform/结构/git 事实，会话级收集） | `env-context.ts` | 20 |
 | 55 | 实例锁（wx 原子 + PID 存活窃取 + 丢失监视 → 调度让位） | `instance-lock.ts` | 20 |
 | 56 | PowerShell 只读分类器（语句/管道切分 + 闭合白名单 + 参数规则 + git 特判） | `powershell-readonly.ts` | 18-2 |
+| 57 | gitignore 感知（list/search 认用户 .gitignore，规则 rebase 到工作区 glob） | `gitignore.ts` + `tools.ts` | 21 |
+| 58 | ask_user_question 结构化提问（选择题 + 自动自由文本 + 拒绝语义） | `question.ts` | 21 |
+| 59 | /models 统一四 API 探测（openai/anthropic/google，形态兼容 + 元数据） | `models-probe.ts` + `provider-setup.ts` | 21 |
 
 ## 关键设计对照
 
@@ -406,6 +409,39 @@
   带密钥——刻意不收）走正常审批；json/rpc 模式的
   `--permission full` 语义不受影响。
 
+### 批次 21 设计要点（2026-10-16）
+
+三件独立的挂账小件。
+
+- **gitignore 感知**（`gitignore.ts`，21-C）：`list_files`/`search_files`
+  此前只认内置 7 条忽略，用户声明的 `build/`、`out/`、`*.log` 全部漏进
+  结果。收集工作区根及子目录全部 `.gitignore`（fast-glob 发现，上限
+  200 条），**rebase 到工作区相对 glob** 交给 fg/rg 原生消费——无需自写
+  匹配器。rebase 的三条形态学（都由测试钉死）：无内部斜杠的规则匹配
+  任意深度，根层也必须显式扩 double-star（fg 的裸 `*.log` 只匹配根层）；
+  尾斜杠（`build/`）是目录标记不算锚定；根锚定（`/dist`）永不扩
+  double-star。**有意边界**：否定规则（`!keep/`）被丢弃——fg 的 ignore
+  与 rg 的 `--glob` 都不支持反排除，保守方向是多显示而非多隐藏；工作区
+  根之上的 `.gitignore` 不收集；每工厂（会话）收集一次，中途改
+  .gitignore 需重启会话。
+- **ask_user_question**（`question.ts`，21-B）：模型的结构化提问通道——
+  每问 2-4 个互斥选项（自动附加"✎ Type something else"，模型不得自列
+  Other）、问题文本唯一且必须以问号结尾、选项标签唯一；拒绝（Esc）
+  时整调用返回"用户已拒绝，以最佳判断继续并说明所做假设"；headless
+  无 UI 时报错并给替代指引；答案回填时显式声明"这是用户自己的决定"。
+  **有意差异**：multiSelect 与预览面板未提供（DSCode 对话原语是单选）。
+  工具描述自带提问方法论："优先一个聚焦的问题；能从仓库查到的别问"。
+- **/models 统一探测**（`models-probe.ts`，21-A）：provider-setup 的
+  自定义 provider 流此前只对 openai 系 API 探测 `/models`。统一为一个
+  探测器覆盖四 API 家族——openai 系发 Authorization+x-api-key 双头
+  （网关读哪个的都有）；anthropic 发 `x-api-key`+`anthropic-version` 打
+  `/v1/models`；google 打 `/v1beta/models?key=`。响应形态兼容
+  `{data}`/`{models}`/裸数组/字符串数组，上下文与输出上限从
+  OpenRouter `top_provider`、`inputTokenLimit`、`output_token_limit`
+  等字段提取（仅展示，不写盘）。永不抛错：失败一律 `ok:false` +
+  人话细节（"the endpoint answered 404 on its model list"）。LM Studio
+  与自定义 provider 流均接入；探测失败给出"手动输入模型 id"指引。
+
 ## 已知限制
 
 - lane 模型克隆会话模型的 `contextWindow`（1M）；flash 档真实窗口更小，
@@ -475,3 +511,7 @@
 `test/batch20.test.ts`（批次 20：真实 git 仓库收集/脏树/主分支两种形态/
 50 行截断/结构排序/渲染含干净树与非 git 分支/锁的获取·拒绝·窃取·损坏容忍·
 自释放·接管监视，16 用例）。
+`test/powershell-readonly.test.ts`（批次 18-2：路由/只读批准/执行构造一票
+否决/别名排除/git 特判/引号插值边界/**真实 pwsh 可执行冒烟**，8 用例）。
+`test/batch21.test.ts`（批次 21：gitignore 解析/三种 rebase 形态/收集与截断/
+损坏容忍/问题校验/答案与拒绝文案/四 API 探测形态与失败细节/摘要格式，11 用例）。

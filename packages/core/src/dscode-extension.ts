@@ -22,6 +22,7 @@ import path from "node:path";
 import { stat as statFile } from "node:fs/promises";
 import { createRereadGuard } from "./reread-guard.js";
 import { registerSleepTool } from "./sleep.js";
+import { registerQuestionTool } from "./question.js";
 import {
   collectEnvironmentContext,
   renderEnvironmentContext,
@@ -618,6 +619,9 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
       // foreground-sleep guard (batch 15), schedule_wakeup's 60s floor, and
       // write_stdin's blind yield windows.
       registerSleepTool(pi);
+      // Structured questions: the model's channel for resolving ambiguity
+      // with multiple-choice dialogs instead of prose rounds.
+      registerQuestionTool(pi);
       // Agent self-scheduling: one pending check-in at a time, fenced wakeup
       // prompt, chain cap so self-scheduling cannot become an undeclared loop.
       pi.registerTool({

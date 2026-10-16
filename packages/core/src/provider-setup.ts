@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 
 import { promptChoice, promptSelect, promptText, type PromptSelectOption } from "./setup-prompts.js";
 import { printInfo, printSection, printSuccess, printWarning } from "./terminal-ui.js";
+import { formatProbeSummary, probeProviderModels } from "./models-probe.js";
 import {
   getModelsJsonPath,
   upsertProviderBaseUrl,
@@ -269,17 +270,22 @@ async function promptCustomProviderSetup(): Promise<CustomProviderSetup | undefi
     printInfo("Using placeholder apiKey value (required by Pi for custom providers).");
   }
 
-  let modelIdsDefault = "my-model";
-  if (api === "openai-completions" || api === "openai-responses") {
-    // Best-effort: hit /models so users can pick correct ids (especially for proxies).
+    let modelIdsDefault = "my-model";
+    // Best-effort: hit the family's model list so users can pick correct
+    // ids (especially for proxies and gateways).
     const resolvedKey = await resolveApiKeyConfig(apiKeyConfig);
-    const modelIds = resolvedKey ? await bestEffortFetchOpenAiModelIds(baseUrl, resolvedKey, authHeader) : undefined;
-    if (modelIds && modelIds.length > 0) {
-      const sample = modelIds.slice(0, 10).join(", ");
-      printInfo(`Detected models: ${sample}${modelIds.length > 10 ? ", ..." : ""}`);
-      modelIdsDefault = modelIds.includes("sonnet") ? "sonnet" : modelIds[0]!;
+    const probe = await probeProviderModels({
+      api,
+      baseUrl,
+      ...(resolvedKey ? { apiKey: resolvedKey } : {}),
+    });
+    if (probe.ok && probe.models.length > 0) {
+      printInfo(`Detected models: ${formatProbeSummary(probe.models)}`);
+      const detectedIds = probe.models.map((model) => model.id);
+      modelIdsDefault = detectedIds.includes("sonnet") ? "sonnet" : detectedIds[0]!;
+    } else if (probe.detail) {
+      printInfo(`Model auto-detection skipped: ${probe.detail}. Enter the model id manually.`);
     }
-  }
 
   const modelIdsRaw = await promptText("Model id(s) (comma-separated)", modelIdsDefault);
   const modelIds = normalizeModelIds(modelIdsRaw);
@@ -302,12 +308,11 @@ async function promptLmStudioProviderSetup(): Promise<CustomProviderSetup | unde
     return undefined;
   }
 
-  const detectedModelIds = await bestEffortFetchOpenAiModelIds(baseUrl, "lm-studio", false);
+  const detected = await probeProviderModels({ api: "openai-completions", baseUrl, apiKey: "lm-studio" });
   let modelIdsDefault = "local-model";
-  if (detectedModelIds && detectedModelIds.length > 0) {
-    const sample = detectedModelIds.slice(0, 10).join(", ");
-    printInfo(`Detected LM Studio models: ${sample}${detectedModelIds.length > 10 ? ", ..." : ""}`);
-    modelIdsDefault = detectedModelIds[0]!;
+  if (detected.ok && detected.models.length > 0) {
+    printInfo(`Detected LM Studio models: ${formatProbeSummary(detected.models)}`);
+    modelIdsDefault = detected.models[0]!.id;
   } else {
     printInfo("No models detected from /models. Enter the exact model id shown in LM Studio.");
   }
