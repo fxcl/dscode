@@ -1,6 +1,7 @@
 import type { PermissionMode } from "./config.js";
 import type { ManagedProcessResult } from "./managed-process.js";
 import type { SandboxMode } from "./runtime-options.js";
+import { matchRule, type PermissionRule } from "./permissions.js";
 
 export type AccessBoundary = "network" | "host";
 
@@ -13,11 +14,23 @@ export interface EffectiveAccess {
 export class SessionAccessController {
   private readonly networkCommands = new Set<string>();
   private readonly hostCommands = new Set<string>();
+  /** Project-level rules loaded at session start (persisted across sessions). */
+  private persistent: PermissionRule[] = [];
 
   constructor(
     private readonly baseSandbox: SandboxMode,
     private readonly baseNetwork: boolean,
   ) {}
+
+  /** Load `.dscode/permissions.json`; checked before session grants. */
+  loadPersistentRules(rules: readonly PermissionRule[]): void {
+    this.persistent = [...rules];
+  }
+
+  /** True when a remembered rule matches this command for this boundary. */
+  hasPersistentGrant(boundary: AccessBoundary, command: string): boolean {
+    return matchRule(this.persistent, boundary, command) !== undefined;
+  }
 
   effective(permission: PermissionMode): EffectiveAccess {
     if (permission === "full") return { sandbox: "danger-full-access", network: true };
@@ -33,7 +46,13 @@ export class SessionAccessController {
     if (permission !== "plan" && this.hostCommands.has(key)) {
       return { sandbox: "danger-full-access", network: true };
     }
-    return this.networkCommands.has(key) ? { ...current, network: true } : current;
+    if (permission !== "plan" && this.hasPersistentGrant("host", command)) {
+      return { sandbox: "danger-full-access", network: true };
+    }
+    if (this.networkCommands.has(key) || (permission !== "plan" && this.hasPersistentGrant("network", command))) {
+      return { ...current, network: true };
+    }
+    return current;
   }
 
   grantForSession(boundary: AccessBoundary, command: string): void {
@@ -54,6 +73,7 @@ export class SessionAccessController {
         ? [`network (${grantCount(this.networkCommands.size)})`]
         : []),
       ...(this.hostCommands.size > 0 ? [`host (${grantCount(this.hostCommands.size)})`] : []),
+      ...(this.persistent.length > 0 ? [`remembered (${grantCount(this.persistent.length)})`] : []),
     ];
   }
 }

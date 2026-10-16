@@ -71,6 +71,7 @@
 | 61 | 竞品 MCP 配置迁移（四家 JSON 源探测/转换/合并，现有条目胜出） | `competitor-config.ts` + `/import-mcp` | 22 |
 | 62 | 会话导出（/export 三格式 + 工具折叠渲染 + 目标路由） | `session-export.ts` + `/export` | 23 |
 | 63 | 图片上下文压缩（1200px/JPEG95/alpha 保 PNG/Jimp 懒加载降级） | `image-compress.ts` + `image-input.ts` | 23 |
+| 64 | 持久化命令允许规则（.dscode/permissions.json + 允许并记住 + /permissions） | `permissions.ts` + `access.ts` | 24 |
 
 ## 关键设计对照
 
@@ -496,6 +497,29 @@
   机制核对修正第五轮判断：DSCode 的图片 marker 由自身生成且必然存在，
   `prunePastedImages` 的"未引用剪除"场景不存在，**不同构不移植**。
 
+### 批次 24 设计要点（2026-10-16，收官批）
+
+- **持久化命令允许规则**（`permissions.ts` + `access.ts` + `/permissions`）：
+  会话 grant 只在内存，每次新会话同样命令从头弹窗——日常摩擦最大的一处。
+  项目级 `.dscode/permissions.json`（可入库共享团队）覆盖两个维度：
+  **边界**（network/host：沿用会话 grant 语义直接放行）与**危险**
+  （classify 判为 dangerous 但用户认定可无人值守跑的命令）。规则为精确
+  命令或 `*` 结尾的前缀模式（`pnpm test*`），匹配用与会话 grant 相同的
+  归一化（折叠空白）；`"*"`（放行一切）被显式拒绝。交互点：dangerous 命令
+  的确认弹窗从两选一变三选一（允许一次 / 允许并记住本项目 / 拒绝）——
+  记住后规则进内存列表立即生效，并提示 `/permissions` 可查。
+  `/permissions` 列出编号清单与文件路径，支持 `remove <pattern|#n>` 与
+  `clear`；`/doctor` 的 grants 行新增 remembered 计数。plan 模式对记忆
+  规则免疫（只读沙箱不变）。损坏/缺失文件一律视为无规则。
+
+### 深挖收官
+
+六轮深挖累计 **64 项**机制落地（批次 1-24）。第六轮结论：未扫描模块只剩
+TUI 内部渲染、pi 框架宿主层、云服务面三类，均无移植面；剩余挂账仅两项
+大件——**MCP OAuth**（600+ 行，OAuth 型服务器接不了的生态刚需）与
+**ACP 协议**（Zed 绑定，DSCode 已有三个宿主面，价值存疑）。后续如用户提出
+真实需求再单开。
+
 ## 已知限制
 
 - lane 模型克隆会话模型的 `contextWindow`（1M）；flash 档真实窗口更小，
@@ -575,3 +599,6 @@ createdAt·updatedAt 语义/最近优先列表与路径穿越拒绝/四形态转
 `test/batch23.test.ts`（批次 23：导出目标路由四分支/工具折叠与隐藏/思考块/
 fence 自适应/HTML 转义/长边适配/alpha 判定/注入式压缩全流程/无处理器降级/
 增益阈值，15 用例）。
+`test/batch24.test.ts`（批次 24：归一化/精确与前缀匹配/放行一切拒绝/按 kind
+匹配/落盘往返/去重与非法输入/损坏文件容错/按模式与序号删除/空态提示/
+access 记忆优先于会话 grant 且 plan 免疫，11 用例）。

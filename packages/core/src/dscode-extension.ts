@@ -41,6 +41,16 @@ import {
 } from "./competitor-config.js";
 import { listPlans, plansDirFor, readPlanFile } from "./plans.js";
 import {
+  addPermissionRule,
+  clearPermissionRules,
+  formatPermissionRules,
+  matchRule,
+  permissionsFileFor,
+  readPermissionRules,
+  removePermissionRule,
+  type PermissionRule,
+} from "./permissions.js";
+import {
   buildMonitorWakeupPrompt,
   buildSelfWakeupPrompt,
   MAX_WAKEUP_CHAIN,
@@ -388,6 +398,8 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
       const monitors = new Map<string, MonitorState>();
       // Environment context: session facts collected once, injected per turn.
       let envContext: EnvironmentContext | undefined;
+      // Remembered project-level permission rules (.dscode/permissions.json).
+      let rememberedRules: PermissionRule[] = [];
       // Instance lock: when another live DSCode process owns this project's
       // lock, this instance defers the autonomous surfaces to it.
       let instanceLockLost: InstanceLockInfo | undefined;
@@ -848,6 +860,10 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
         }
         // Environment facts for the system prompt: collected once per session.
         envContext = await collectEnvironmentContext(ctx.cwd).catch(() => undefined);
+        // Remembered permission rules: loaded once; kept live so an
+        // "allow and remember" from this session applies immediately.
+        rememberedRules = await readPermissionRules(ctx.cwd).catch(() => []);
+        access.loadPersistentRules(rememberedRules);
         // Instance lock: the first live DSCode on a project drives the
         // autonomous surfaces; a second defers until the lock frees up.
         instanceLockLost = undefined;
@@ -1308,7 +1324,12 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
           typeof event.input.cmd === "string"
             ? event.input.cmd
             : undefined;
-        const dangerousCommand = command !== undefined && classifyCommand(command) === "dangerous";
+        const dangerousCommand =
+          command !== undefined &&
+          classifyCommand(command) === "dangerous" &&
+          permission !== "plan" &&
+          // Remembered destructive commands skip the prompt entirely.
+          !rememberedRules.some((rule) => matchRule([rule], "dangerous", command!));
         if (permission === "plan" && dangerousCommand) {
           return {
             block: true,
@@ -1345,11 +1366,18 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
           };
         }
         if (dangerousCommand) {
-          const approved = await ctx.ui.confirm(
-            "Run destructive command?",
-            `${command}\n\nThis may delete data or alter system/process state.`,
-          );
-          if (!approved) return { block: true, reason: "Destructive command denied by user" };
+          const choice = await requestDestructiveApproval(command, ctx);
+          if (choice === "deny") return { block: true, reason: "Destructive command denied by user" };
+          if (choice === "remember") {
+            // Project-level, shareable with the team; /permissions manages it.
+            await addPermissionRule(ctx.cwd, "dangerous", command).catch(() => {});
+            rememberedRules = await readPermissionRules(ctx.cwd).catch(() => rememberedRules);
+            access.loadPersistentRules(rememberedRules);
+            ctx.ui.notify(
+              `Remembered in ${permissionsFileFor(ctx.cwd)} - this command no longer prompts here. /permissions to review.`,
+              "info",
+            );
+          }
         } else if (
           event.toolName === "apply_patch" &&
           isRecord(event.input) &&
@@ -2405,6 +2433,35 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
           }
           lines.push("Env values were migrated verbatim - move secrets into the vault (/vault) if desired.");
           ctx.ui.notify(lines.join("\n"), "info");
+        },
+      });
+
+      pi.registerCommand("permissions", {
+        description: "Show or remove remembered permissions (remove <n>|clear)",
+        handler: async (args, ctx) => {
+          const action = args.trim();
+          if (action === "clear") {
+            await clearPermissionRules(ctx.cwd).catch(() => {});
+            rememberedRules = [];
+            access.loadPersistentRules([]);
+            ctx.ui.notify("Remembered permissions cleared.", "info");
+            return;
+          }
+          if (action.startsWith("remove ")) {
+            const selector = action.slice("remove ".length).trim();
+            const removed = await removePermissionRule(ctx.cwd, selector).catch(() => 0);
+            rememberedRules = await readPermissionRules(ctx.cwd).catch(() => rememberedRules);
+            access.loadPersistentRules(rememberedRules);
+            ctx.ui.notify(
+              removed > 0 ? `Removed ${removed} rule(s).` : `No rule matching "${selector}".`,
+              removed > 0 ? "info" : "warning",
+            );
+            return;
+          }
+          ctx.ui.notify(
+            `${formatPermissionRules(await readPermissionRules(ctx.cwd))}\n\n${permissionsFileFor(ctx.cwd)}\n/permissions remove <pattern|#n> · /permissions clear`,
+            "info",
+          );
         },
       });
 
@@ -3696,4 +3753,28 @@ function registerWebSearchTool(pi: ExtensionAPI): void {
       return renderToolCall("Searched", String(args.query ?? ""), theme, context);
     },
   });
+}
+
+/**
+ * Three-way approval for destructive commands: allow once, allow and
+ * remember for this project, or deny. The confirm() two-way dialog can't
+ * express the middle option, so the selector is used.
+ */
+async function requestDestructiveApproval(
+  command: string,
+  ctx: ExtensionContext,
+): Promise<"once" | "remember" | "deny"> {
+  ctx.ui.setWorkingVisible(false);
+  let choice: string | undefined;
+  try {
+    choice = await ctx.ui.select(
+      "Run destructive command?",
+      ["Allow once", "Allow and remember for this project", "Deny"],
+    );
+  } finally {
+    ctx.ui.setWorkingVisible(true);
+  }
+  if (choice === "Allow once") return "once";
+  if (choice === "Allow and remember for this project") return "remember";
+  return "deny";
 }
