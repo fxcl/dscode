@@ -69,6 +69,8 @@
 | 59 | /models 统一四 API 探测（openai/anthropic/google，形态兼容 + 元数据） | `models-probe.ts` + `provider-setup.ts` | 21 |
 | 60 | 计划簿（计划跨会话归档 .dscode/plans + 索引 + /plans 恢复） | `plans.ts` + `plan.ts` + `/plans` | 22 |
 | 61 | 竞品 MCP 配置迁移（四家 JSON 源探测/转换/合并，现有条目胜出） | `competitor-config.ts` + `/import-mcp` | 22 |
+| 62 | 会话导出（/export 三格式 + 工具折叠渲染 + 目标路由） | `session-export.ts` + `/export` | 23 |
+| 63 | 图片上下文压缩（1200px/JPEG95/alpha 保 PNG/Jimp 懒加载降级） | `image-compress.ts` + `image-input.ts` | 23 |
 
 ## 关键设计对照
 
@@ -472,6 +474,28 @@
   角色 + worktree diff 回传，两者产物契约不同构。注册表机制留给
   DSCode 自己的 agent 模型演进，不按源形态移植。
 
+### 批次 23 设计要点（2026-10-16）
+
+第五轮"输入/输出人体工学"轴的两个零覆盖缺口。
+
+- **会话导出**（`session-export.ts` + `/export`）：三格式——`jsonl`
+  是原始会话文件逐字节拷贝（审计级无损）；`md`/`html` 走同一渲染器：
+  user 正文、assistant 叙述、thinking 折叠为 💭 块，每个工具调用折叠为
+  `<details><summary>🔧 工具名 + JSON 参数</summary>`，结果 fenced 放入
+  （无结果显示 "_No result captured._"，图片占位 "_[image]_"），内部
+  管道工具（search_tools）不出现。**summary 经 HTML 转义**——JSON 参数
+  里的尖括号与 & 不能逃出元素；fence 长度随内容内嵌围栏自适应延长。
+  目标路由与源机制一致：裸格式词 → cwd 默认文件名（日期-sessionId），
+  目录 → 目录内默认名，路径按扩展名白名单判格式，无法推断时报错并列出
+  可用形式。HTML 是极简内联样式的独立页面，正文转义、工具行保留原生。
+- **图片上下文压缩**（`image-compress.ts`）：长边 1200px、有 alpha 保
+  PNG 否则 JPEG 质量 95、返回完整前后元数据（尺寸/字节/压缩比），增益
+  不足 1.2x 不压、不夸报。**Jimp 是可选依赖**（optionalDependencies）+
+  懒加载 processor 抽象：库缺失或解码失败一律静默降级为原图直传，
+  安装故事与主流程都不受影响；压缩生效时向用户通知压缩比与尺寸变化。
+  机制核对修正第五轮判断：DSCode 的图片 marker 由自身生成且必然存在，
+  `prunePastedImages` 的"未引用剪除"场景不存在，**不同构不移植**。
+
 ## 已知限制
 
 - lane 模型克隆会话模型的 `contextWindow`（1M）；flash 档真实窗口更小，
@@ -548,3 +572,6 @@
 `test/batch22.test.ts`（批次 22：slug·标题·状态推导/markdown 渲染/修订归档的
 createdAt·updatedAt 语义/最近优先列表与路径穿越拒绝/四形态转换/四源发现/
 空发现警告/合并三分类，8 用例）。
+`test/batch23.test.ts`（批次 23：导出目标路由四分支/工具折叠与隐藏/思考块/
+fence 自适应/HTML 转义/长边适配/alpha 判定/注入式压缩全流程/无处理器降级/
+增益阈值，15 用例）。

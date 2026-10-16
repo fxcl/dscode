@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { compressImageForContext, loadJimpProcessor, shouldCompress, type CompressionOutcome } from "./image-compress.js";
 
 const IMAGE_PATH_PATTERN =
   /(^|\s)(@?(?:"[^"\r\n]+\.(?:png|jpe?g|gif|webp)"|'[^'\r\n]+\.(?:png|jpe?g|gif|webp)'|[^\s"'<>]+\.(?:png|jpe?g|gif|webp)))(?=\s|$)/giu;
@@ -36,13 +37,39 @@ export interface EditorImageAttachment {
 }
 
 export function registerLocalImageInput(pi: ExtensionAPI): void {
+  const processorPromise = loadJimpProcessor();
+  const compressOne = async (
+    image: ImageContent,
+  ): Promise<{ image: ImageContent; note: string | undefined }> => {
+    try {
+      const processor = await processorPromise;
+      const outcome = await compressImageForContext(
+        { base64: image.data, mediaType: image.mimeType },
+        processor,
+      );
+      if (outcome && shouldCompress(outcome)) {
+        return {
+          image: { type: "image", data: outcome.compressedBase64, mimeType: outcome.mediaType },
+          note: outcome.note,
+        };
+      }
+    } catch {
+      // Compression is optional; the original passes through.
+    }
+    return { image, note: undefined };
+  };
+
   pi.on("input", async (event, ctx) => {
     if (event.source !== "interactive") return { action: "continue" };
 
     const result = await extractLocalImageInput(event.text, ctx.cwd);
-    const images = [...(event.images ?? []), ...result.images];
-    if (result.errors.length > 0) {
-      ctx.ui.notify(result.errors.join("\n"), result.images.length > 0 ? "warning" : "error");
+    const raw = [...(event.images ?? []), ...result.images];
+    const compressed = await Promise.all(raw.map(compressOne));
+    const images = compressed.map((entry) => entry.image);
+    const notes = compressed.map((entry) => entry.note).filter((note): note is string => Boolean(note));
+    const errors = [...result.errors, ...notes];
+    if (errors.length > 0) {
+      ctx.ui.notify(errors.join("\n"), result.images.length > 0 || notes.length > 0 ? "warning" : "error");
     }
     if (images.length === 0) {
       return result.errors.length > 0 ? { action: "handled" } : { action: "continue" };
