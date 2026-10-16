@@ -1,3 +1,6 @@
+import { realpath } from "node:fs/promises";
+import path from "node:path";
+
 /**
  * Reread guard: repeated identical reads of the same file region waste tokens
  * and usually mean the model is stuck in a loop. A small LRU keyed by
@@ -9,6 +12,36 @@
 
 export const REREAD_NOTICE_THRESHOLD = 3;
 export const REREAD_MAX_ENTRIES = 256;
+
+/**
+ * Path identity: resolve symlinks to a canonical key so `./src/a.ts`,
+ * `src/../src/a.ts`, and a symlinked alias count as the same read. When
+ * realpath fails (missing file, broken link), fall back to the deepest
+ * EXISTING ancestor's realpath plus the missing tail — the documented
+ * command-code canonical-key mechanism.
+ */
+export async function canonicalKey(absolutePath: string): Promise<string> {
+  const normalized = path.normalize(absolutePath);
+  try {
+    return path.normalize(await realpath(normalized));
+  } catch {
+    // fall through to the ancestor walk
+  }
+  let tail: string[] = [];
+  let current = normalized;
+  for (;;) {
+    const parent = path.dirname(current);
+    if (parent === current) return normalized; // reached the root; give up gracefully
+    tail.unshift(path.basename(current));
+    current = parent;
+    try {
+      const resolvedParent = path.normalize(await realpath(current));
+      return path.normalize(path.join(resolvedParent, ...tail));
+    } catch {
+      continue;
+    }
+  }
+}
 
 export interface ReadObservation {
   path: string;

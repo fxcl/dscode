@@ -20,8 +20,11 @@ export function registerSessionCommands(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("export", {
-    description: "Export this session to a file (html | md | jsonl, or a destination path)",
-    handler: async (args, ctx) => {
+    description: "Export this session to a file (html | md | jsonl, or a destination path; --raw skips secret scrubbing)",
+    handler: async (rawArgs, ctx) => {
+      // --raw is the audit escape hatch: no secret scrubbing on tool text.
+      const scrub = !rawArgs.includes("--raw");
+      const args = rawArgs.replaceAll("--raw", "").trim();
       const sessionFile = ctx.sessionManager.getSessionFile();
       if (!sessionFile) {
         ctx.ui.notify("Nothing to export yet — the transcript is created on the first message.", "info");
@@ -50,13 +53,17 @@ export function registerSessionCommands(pi: ExtensionAPI): void {
         title: pi.getSessionName() || sessionId,
         sessionId,
         exportedAt: new Date().toISOString(),
+        redact: scrub,
         ...(ctx.model ? { model: `${ctx.model.provider}/${ctx.model.id}` } : {}),
         messages,
       };
       const content =
         target.format === "md" ? renderSessionMarkdown(renderOptions) : renderSessionHtml(renderOptions);
       await writeFile(target.path, content, "utf8");
-      ctx.ui.notify(`Exported ${target.format.toUpperCase()} session to ${target.path}`, "info");
+      ctx.ui.notify(
+        `Exported ${target.format.toUpperCase()} session to ${target.path}${scrub ? "" : " (raw, not scrubbed)"}`,
+        "info",
+      );
     },
   });
 }

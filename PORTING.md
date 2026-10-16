@@ -72,6 +72,10 @@
 | 62 | 会话导出（/export 三格式 + 工具折叠渲染 + 目标路由） | `session-export.ts` + `/export` | 23 |
 | 63 | 图片上下文压缩（1200px/JPEG95/alpha 保 PNG/Jimp 懒加载降级） | `image-compress.ts` + `image-input.ts` | 23 |
 | 64 | 持久化命令允许规则（.dscode/permissions.json + 允许并记住 + /permissions） | `permissions.ts` + `access.ts` | 24 |
+| 65 | 进程错误三档防护（EPIPE 优雅退出 0 / stderr 吞掉 / 真异常退出 1） | `process-hygiene.ts` + `cli-runtime.ts` | 25 |
+| 66 | 秘密与 PII 两级清洗（secrets 级 + 网络事实级，/export 默认开 --raw 逃生口） | `scrub.ts` + `session-export.ts` | 25 |
+| 67 | rg 缺失可操作报错（未捆绑依赖，给安装与替代命令指引） | `tools.ts` | 25 |
+| 68 | canonicalKey 路径身份（realpath + 最深存在祖先回退，reread 键升级） | `reread-guard.ts` | 25 |
 
 ## 关键设计对照
 
@@ -520,6 +524,31 @@ TUI 内部渲染、pi 框架宿主层、云服务面三类，均无移植面；�
 **ACP 协议**（Zed 绑定，DSCode 已有三个宿主面，价值存疑）。后续如用户提出
 真实需求再单开。
 
+### 批次 25 设计要点（2026-10-16，第七轮·健壮性与卫生）
+
+第七轮换轴"不问功能问失败模式"，四件全为补 DSCode 的失败面。
+
+- **进程错误三档防护**（`process-hygiene.ts`）：`dscode -p "..." | head`
+  这类组合此前会裸崩——下游关管道后 stdout 写入收到 EPIPE，一屏堆栈加
+  非零退出。三档：stdout 良性写错误（EPIPE/ECONNRESET/EOF，errno+write
+  syscall 判定）→ **退出码 0**（下游看到正常结束）；stderr 同类 → 吞掉
+  继续跑；uncaughtException 若为良性写错误（分离定时器刷写可绕过流处理
+  器直达此处）→ 同样优雅退出 0，其余 → 崩溃信息 + 退出码 1。
+  runDSCodeProcess 的 catch 兜底同样识别良性写错误。
+- **秘密与 PII 两级清洗**（`scrub.ts`）：一级（secrets）——家目录路径、
+  32+ 位 hex token、厂商前缀 API key（`sk-`/`ghp_`/`hf_`，含下划线形态
+  ——真实 GitHub PAT 用 `ghp_` 不是 `ghp-`）→ `[path]`/`[token]`/
+  `[apikey]`；二级（网络事实，用于错误文本）——URL、IP、errno+主机名
+  → `[url]`/`[ip]`/`[host]`。**/export 的工具参数、结果、用户正文、
+  thinking 默认全部过一级清洗**（分享导出的全部意义就是分享，密钥不能
+  跟着走）；`--raw` 是审计逃生口。jsonl 始终原样（审计级无损不变）。
+- **rg 缺失可操作报错**：rg 不是捆绑依赖，裸机上的 ENOENT 现在给安装
+  指引（winget/scoop）与替代命令（Select-String/grep），替代模型瞎猜。
+- **canonicalKey 路径身份**：reread-guard 的键从原始路径字符串升级为
+  realpath 规范键（失败回退"最深存在祖先 realpath + 缺失尾巴重拼"）——
+  `./a.ts`、`src/../a.ts`、symlink 别名计为同一次阅读。第二轮立项、
+  四轮欠账，至此闭环。
+
 ## 已知限制
 
 - lane 模型克隆会话模型的 `contextWindow`（1M）；flash 档真实窗口更小，
@@ -602,3 +631,6 @@ fence 自适应/HTML 转义/长边适配/alpha 判定/注入式压缩全流程/�
 `test/batch24.test.ts`（批次 24：归一化/精确与前缀匹配/放行一切拒绝/按 kind
 匹配/落盘往返/去重与非法输入/损坏文件容错/按模式与序号删除/空态提示/
 access 记忆优先于会话 grant 且 plan 免疫，11 用例）。
+`test/batch25.test.ts`（批次 25：良性写错误双形态判定与拒绝集/家目录路径与
+hex·厂商前缀密钥清洗/二级 URL·IP·errno 主机清洗/普通文本不误伤/canonical
+路径别名·symlink·缺失祖先回退，9 用例）。

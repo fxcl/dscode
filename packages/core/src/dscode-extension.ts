@@ -20,7 +20,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import path from "node:path";
 import { stat as statFile, mkdir, readFile, writeFile } from "node:fs/promises";
-import { createRereadGuard } from "./reread-guard.js";
+import { canonicalKey, createRereadGuard } from "./reread-guard.js";
 import { registerSleepTool } from "./sleep.js";
 import { registerQuestionTool } from "./question.js";
 import {
@@ -1502,6 +1502,9 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
                   : undefined;
           if (readPath) {
             const absolute = path.isAbsolute(readPath) ? readPath : path.join(ctx.cwd, readPath);
+            // Canonical identity: ./a.ts, src/../a.ts, and symlink aliases
+            // must count as the same read for the reread counter.
+            const identity = await canonicalKey(absolute).catch(() => absolute);
             let stat: { mtimeMs: number; size: number } | undefined;
             try {
               const found = await statFile(absolute);
@@ -1512,7 +1515,7 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
             const asLine = (value: unknown): number | undefined =>
               typeof value === "number" && Number.isFinite(value) ? value : undefined;
             const notice = rereadGuard.observe({
-              path: readPath,
+              path: identity,
               ...(stat ? { mtimeMs: stat.mtimeMs, size: stat.size } : {}),
               ...(asLine(readInput.line_start ?? readInput.offset) !== undefined
                 ? { lineStart: asLine(readInput.line_start ?? readInput.offset) }

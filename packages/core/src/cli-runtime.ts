@@ -8,6 +8,7 @@ import { formatPackageList } from "./packages.js";
 import { installPiLoginSecretMask } from "./pi-login-mask.js";
 import { installPiMarkdownCodeBlocks } from "./pi-markdown.js";
 import { parseSupportedProviderId, type SupportedProviderId } from "./providers.js";
+import { isBenignStreamWriteError, installProcessErrorHygiene } from "./process-hygiene.js";
 import { parseRuntimeArgs, printDSCodeHelp } from "./runtime-options.js";
 import { installDSCodeRuntimeBranding } from "./runtime-branding.js";
 import { installSkills, formatInstallSkillsResult, type SkillInstallTarget } from "./skills-installer.js";
@@ -214,9 +215,15 @@ export async function runDSCode(argv: string[]): Promise<void> {
 
 /** Process-oriented wrapper used by the terminal and bundled RPC entry points. */
 export async function runDSCodeProcess(argv: string[]): Promise<void> {
+  installProcessErrorHygiene();
   try {
     await runDSCode(argv);
   } catch (error) {
+    // Benign stream failures can surface here as a thrown write error when
+    // the consumer closed early; compose like a Unix tool and exit cleanly.
+    if (isBenignStreamWriteError(error)) {
+      process.exit(0);
+    }
     process.stderr.write(`${pc.red("error:")} ${formatDSCodeError(error)}\n`);
     process.exitCode = 1;
   }

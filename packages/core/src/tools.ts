@@ -137,6 +137,14 @@ export function createCodingTools(workspace: Workspace, harness: HarnessMode = "
         maxOutputBytes: 150_000,
       });
       if (result.exitCode !== 0 && result.exitCode !== 1) {
+        // rg is NOT a bundled dependency: on machines without it, give an
+        // actionable error instead of a bare ENOENT the model would guess at.
+        if (result.stderr.includes("ENOENT") || result.exitCode === 127) {
+          throw new Error(
+            "ripgrep (rg) is not installed on this machine. Either install it (winget install BurntSushi.ripgrep.MSVC / scoop install ripgrep) " +
+              "or search with exec_command instead: Select-String -Path <glob> -Pattern <text> on Windows, grep -rn <text> <dir> elsewhere.",
+          );
+        }
         throw new Error(result.stderr || `ripgrep exited with code ${result.exitCode}`);
       }
       const output = result.stdout

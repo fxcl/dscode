@@ -1,5 +1,6 @@
 import path from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { scrubPII } from "./scrub.js";
 
 /**
  * Session export: turn a finished session into a shareable artifact in one
@@ -71,6 +72,8 @@ export interface RenderOptions {
   messages: readonly ExportMessage[];
   /** Tools whose calls never appear in exports (internal plumbing). */
   hiddenTools?: ReadonlySet<string> | undefined;
+  /** Scrub secrets/PII from tool arguments and results (default true). */
+  redact?: boolean | undefined;
 }
 
 interface ToolRecord {
@@ -121,7 +124,12 @@ function firstLine(text: string, limit = 100): string {
 }
 
 /** One assistant/user/toolResult message → markdown rows (HTML details for tools). */
-export function renderMessageRows(message: ExportMessage, outputs: Map<string, ToolRecord>): string[] {
+export function renderMessageRows(
+  message: ExportMessage,
+  outputs: Map<string, ToolRecord>,
+  redact = true,
+): string[] {
+  const clean = (text: string): string => (redact ? scrubPII(text) : text);
   const rows: string[] = [];
   if (message.role === "user") {
     const text = Array.isArray(message.content)
@@ -138,7 +146,7 @@ export function renderMessageRows(message: ExportMessage, outputs: Map<string, T
       : typeof message.content === "string"
         ? message.content
         : "";
-    if (text.trim()) rows.push(`### 🧑 User\n\n${text.trim()}`);
+    if (text.trim()) rows.push(`### 🧑 User\n\n${clean(text.trim())}`);
     return rows;
   }
   if (message.role !== "assistant") return rows;
@@ -151,12 +159,12 @@ export function renderMessageRows(message: ExportMessage, outputs: Map<string, T
   for (const block of content) {
     if (typeof block !== "object" || block === null) continue;
     if (block.type === "text" && typeof block.text === "string") {
-      prose += block.text;
+      prose += clean(block.text);
       continue;
     }
     if (block.type === "thinking" && typeof block.thinking === "string" && block.thinking.trim()) {
       flush();
-      rows.push(`<details>\n<summary>💭 Reasoning</summary>\n\n${block.thinking.trim()}\n\n</details>`);
+      rows.push(`<details>\n<summary>💭 Reasoning</summary>\n\n${clean(block.thinking.trim())}\n\n</details>`);
       continue;
     }
     if (block.type === "toolCall") {
@@ -165,7 +173,7 @@ export function renderMessageRows(message: ExportMessage, outputs: Map<string, T
       const name = typeof block.name === "string" ? block.name : "tool";
       if (HIDDEN_EXPORT_TOOLS.has(name)) continue;
       const record = outputs.get(id);
-      const argsSummary = firstLine(safeJson(block.arguments ?? block.args));
+      const argsSummary = firstLine(clean(safeJson(block.arguments ?? block.args)));
       // Summary lands inside HTML; JSON quotes and angle brackets must not
       // break out of the <summary> element.
       const summary = escapeHtml(`${name}${argsSummary ? ` ${argsSummary}` : ""}`);
@@ -174,7 +182,7 @@ export function renderMessageRows(message: ExportMessage, outputs: Map<string, T
         continue;
       }
       const body: string[] = [];
-      if (record.text) body.push(fence(record.text));
+      if (record.text) body.push(fence(clean(record.text)));
       if (record.images > 0) body.push(Array.from({ length: record.images }, () => "_[image]_").join("\n"));
       rows.push(`<details>\n<summary>🔧 ${summary}</summary>\n\n${body.join("\n\n")}\n\n</details>`);
     }
