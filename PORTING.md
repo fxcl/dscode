@@ -67,6 +67,8 @@
 | 57 | gitignore 感知（list/search 认用户 .gitignore，规则 rebase 到工作区 glob） | `gitignore.ts` + `tools.ts` | 21 |
 | 58 | ask_user_question 结构化提问（选择题 + 自动自由文本 + 拒绝语义） | `question.ts` | 21 |
 | 59 | /models 统一四 API 探测（openai/anthropic/google，形态兼容 + 元数据） | `models-probe.ts` + `provider-setup.ts` | 21 |
+| 60 | 计划簿（计划跨会话归档 .dscode/plans + 索引 + /plans 恢复） | `plans.ts` + `plan.ts` + `/plans` | 22 |
+| 61 | 竞品 MCP 配置迁移（四家 JSON 源探测/转换/合并，现有条目胜出） | `competitor-config.ts` + `/import-mcp` | 22 |
 
 ## 关键设计对照
 
@@ -442,6 +444,34 @@
   人话细节（"the endpoint answered 404 on its model list"）。LM Studio
   与自定义 provider 流均接入；探测失败给出"手动输入模型 id"指引。
 
+### 批次 22 设计要点（2026-10-16）
+
+两个 feature 级大件。
+
+- **计划簿**（`plans.ts`，22）：`update_plan` 每次修订同时归档到
+  `.dscode/plans/<slug>.md`（markdown 勾选清单）+ `index.json`（title/
+  status/createdAt/updatedAt/revision）——slug 取自首步骤。会话内计划
+  仍是活副本（批次 17 每轮重注入）；簿是跨会话档案。`/plans` 命令按
+  最近更新列出（`[status] title · date`），选中后把计划全文 fenced 为
+  `<archived-plan>` 数据注入并明确指示："先验证它是否仍与仓库现状
+  相符，已完成或已失效的步骤自行调整"。索引写串行化（per 目录
+  promise 链）；归档 best-effort，绝不阻塞或失败计划更新。
+- **竞品 MCP 配置迁移**（`competitor-config.ts`，22）：`/import-mcp`
+  探测四家 JSON 格式的 MCP 声明——Claude Code（~/.claude.json +
+  项目 .mcp.json）、Cursor（~/.cursor/mcp.json）、Gemini
+  （~/.gemini/settings.json）、OpenCode（全局 + 项目 opencode.json，
+  其 command 是数组形态）——统一转换为 DSCode 的 stdio/http 形态
+  （string+args 字段与数组命令两种形态都归一；url 远程条目转 http；
+  env 逐字迁移，含用户已有的 `${vault:}` 引用）。合并语义：**现有
+  DSCode 条目永远胜出**（冲突跳过并列名）、字节级相同的记 identical、
+  新增的才写入。Codex 为 TOML 格式，有意不解析。写盘后提示重启会话
+  连接、并建议把明文密钥移入 vault。探测全部 best-effort，无发现时
+  给出检查过的来源清单。
+- **子代理注册表升级的有意不做**：command-code 的 agent 工具是
+  frontmatter 注册表 + 独立 agent 运行时；DSCode 的 delegate 是固定
+  角色 + worktree diff 回传，两者产物契约不同构。注册表机制留给
+  DSCode 自己的 agent 模型演进，不按源形态移植。
+
 ## 已知限制
 
 - lane 模型克隆会话模型的 `contextWindow`（1M）；flash 档真实窗口更小，
@@ -515,3 +545,6 @@
 否决/别名排除/git 特判/引号插值边界/**真实 pwsh 可执行冒烟**，8 用例）。
 `test/batch21.test.ts`（批次 21：gitignore 解析/三种 rebase 形态/收集与截断/
 损坏容忍/问题校验/答案与拒绝文案/四 API 探测形态与失败细节/摘要格式，11 用例）。
+`test/batch22.test.ts`（批次 22：slug·标题·状态推导/markdown 渲染/修订归档的
+createdAt·updatedAt 语义/最近优先列表与路径穿越拒绝/四形态转换/四源发现/
+空发现警告/合并三分类，8 用例）。

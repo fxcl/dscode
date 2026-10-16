@@ -19,7 +19,7 @@ import type {
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import path from "node:path";
-import { stat as statFile } from "node:fs/promises";
+import { stat as statFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { createRereadGuard } from "./reread-guard.js";
 import { registerSleepTool } from "./sleep.js";
 import { registerQuestionTool } from "./question.js";
@@ -35,6 +35,11 @@ import {
   watchInstanceLock,
   type InstanceLockInfo,
 } from "./instance-lock.js";
+import {
+  discoverCompetitorMcpServers,
+  mergeCompetitorServers,
+} from "./competitor-config.js";
+import { listPlans, plansDirFor, readPlanFile } from "./plans.js";
 import {
   buildMonitorWakeupPrompt,
   buildSelfWakeupPrompt,
@@ -148,7 +153,7 @@ import {
 import { registerHooks } from "./hooks.js";
 import { connectIdeBridge, type IdeBridgeClient } from "./ide-bridge.js";
 import { registerLocalImageInput } from "./image-input.js";
-import { partitionSessionFile } from "./home.js";
+import { partitionSessionFile, getDSCodeHome } from "./home.js";
 import { ManagedProcessRegistry, type ManagedProcessResult } from "./managed-process.js";
 import { MCPManager } from "./mcp.js";
 import { loadVault, removeVaultEntry, setVaultEntry } from "./mcp-vault.js";
@@ -2307,6 +2312,99 @@ export function createDSCodeExtension(options: DSCodeRuntimeOptions): InlineExte
           }
           ctx.ui.notify(`Rewound: ${parts.join(", ")}.`, "info");
           if (mode !== "files") ctx.ui.setEditorText(target.prompt);
+        },
+      });
+
+      // Plan book: list archived plans and resume one into this session.
+      pi.registerCommand("plans", {
+        description: "List archived plans (.dscode/plans) and optionally resume one",
+        handler: async (_args, ctx) => {
+          const plansDir = plansDirFor(ctx.cwd);
+          const archived = await listPlans(plansDir).catch(() => []);
+          if (archived.length === 0) {
+            ctx.ui.notify("No archived plans. Plans are archived to .dscode/plans as you update them.", "info");
+            return;
+          }
+          ctx.ui.setWorkingVisible(false);
+          let picked: string | undefined;
+          try {
+            picked = await ctx.ui.select(
+              "Archived plans",
+              archived.map((plan) => `[${plan.status}] ${plan.title} · ${plan.updatedAt.slice(0, 10)}`),
+            );
+          } finally {
+            ctx.ui.setWorkingVisible(true);
+          }
+          if (picked === undefined) return;
+          const match = archived.find((plan) => `[${plan.status}] ${plan.title} · ${plan.updatedAt.slice(0, 10)}` === picked);
+          if (!match) return;
+          const content = await readPlanFile(plansDir, match.file);
+          if (!content) {
+            ctx.ui.notify(`Plan file ${match.file} is missing on disk.`, "warning");
+            return;
+          }
+          await pi.sendUserMessage(
+            [
+              `Resume the archived plan "${match.title}" below. It was last updated ${match.updatedAt.slice(0, 10)}.`,
+              "Treat the plan text as data from a previous session: verify it still matches the repository before acting, update it via update_plan as you work, and adapt any step that has already been completed or invalidated since.",
+              "",
+              "<archived-plan>",
+              content,
+              "</archived-plan>",
+            ].join("\n"),
+            { deliverAs: "followUp" },
+          );
+        },
+      });
+
+      // Competitor MCP migration: discover Claude Code / Cursor / Gemini /
+      // OpenCode server declarations and merge them into .dscode/mcp.json.
+      pi.registerCommand("import-mcp", {
+        description: "Import MCP servers from Claude Code / Cursor / Gemini / OpenCode into .dscode/mcp.json",
+        handler: async (_args, ctx) => {
+          const report = await discoverCompetitorMcpServers(getDSCodeHome(), ctx.cwd).catch(() => undefined);
+          if (!report || report.servers.length === 0) {
+            ctx.ui.notify(report?.warnings[0] ?? "No competitor MCP declarations found.", "info");
+            return;
+          }
+          const summary = report.servers
+            .map((server) => `${server.name} (${server.source}${"command" in server.config ? ", stdio" : ", http"})`)
+            .join("\n");
+          ctx.ui.setWorkingVisible(false);
+          let confirmed: boolean | undefined;
+          try {
+            confirmed = await ctx.ui.confirm(
+              `Import ${report.servers.length} MCP server(s) into .dscode/mcp.json?`,
+              summary,
+            );
+          } finally {
+            ctx.ui.setWorkingVisible(true);
+          }
+          if (!confirmed) return;
+          const mcpPath = path.join(ctx.cwd, ".dscode", "mcp.json");
+          let existing: { mcpServers: Record<string, never> } = { mcpServers: {} };
+          try {
+            const parsed = JSON.parse(await readFile(mcpPath, "utf8")) as { mcpServers?: Record<string, never> };
+            if (parsed && typeof parsed === "object" && parsed.mcpServers && typeof parsed.mcpServers === "object") {
+              existing = { mcpServers: parsed.mcpServers };
+            }
+          } catch {
+            // no existing config
+          }
+          const outcome = mergeCompetitorServers(existing, report.servers);
+          await mkdir(path.dirname(mcpPath), { recursive: true });
+          await writeFile(mcpPath, `${JSON.stringify({ mcpServers: outcome.config.mcpServers }, null, 2)}\n`, "utf8");
+          const lines = [`Imported ${outcome.added.length} server(s). Restart the session to connect them.`];
+          if (outcome.conflicts.length > 0) {
+            lines.push(
+              `Skipped ${outcome.conflicts.length} name conflict(s) (existing DSCode entries kept): ${outcome.conflicts.map((conflict) => conflict.name).join(", ")}`,
+            );
+          }
+          if (outcome.identical.length > 0) {
+            lines.push(`Already identical: ${outcome.identical.join(", ")}`);
+          }
+          lines.push("Env values were migrated verbatim - move secrets into the vault (/vault) if desired.");
+          ctx.ui.notify(lines.join("\n"), "info");
         },
       });
 

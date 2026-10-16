@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-wor
 import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { brandBlue } from "./brand.js";
+import { writePlanSnapshot } from "./plans.js";
 
 export const PLAN_STATE_ENTRY = "dscode-plan-state";
 
@@ -67,6 +68,9 @@ export function registerPlanTool(
       };
       pi.appendEntry(PLAN_STATE_ENTRY, plan);
       onUpdate(plan, ctx);
+      // Archive to the cross-session plan book; never blocks or fails the
+      // in-session update.
+      void writePlanSnapshot(ctx.cwd, plan).catch(() => {});
       const completed = plan.steps.filter((step) => step.status === "completed").length;
       const notes = planUpdateNotes(previous, plan);
       return {
